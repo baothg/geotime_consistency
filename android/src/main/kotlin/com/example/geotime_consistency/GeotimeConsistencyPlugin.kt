@@ -11,6 +11,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 
 /** GeotimeConsistencyPlugin */
 class GeotimeConsistencyPlugin :
@@ -72,8 +73,9 @@ class GeotimeConsistencyPlugin :
             )
         }
 
-        // 2. Device integrity (local signals).
-        val integrity = IntegrityChecker.check(appContext)
+        // 2. Device integrity (local signals — spawns `which su`/`getprop`
+        //    processes; keep off the UI thread).
+        val integrity = withContext(Dispatchers.IO) { IntegrityChecker.check(appContext) }
 
         // 3. Location fix + mock + radius.
         val loc = LocationChecker.check(appContext, targetLat, targetLng)
