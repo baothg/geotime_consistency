@@ -62,8 +62,6 @@ Knox devices are **not** blocked: Knox Workspace runs the app normally,
 `isMock` and root checks behave identically on OneUI. If the Knox
 warranty bit was ever tripped (bootloader unlocked — possibly by a
 previous owner), you get `knoxTripped` as a *warning*, not a failure.
-If you later add Play Integrity and want to distinguish it, a tripped
-Knox bit maps to `deviceIntegrity`.
 
 ## Install
 
@@ -116,7 +114,8 @@ The plugin manifest already declares `INTERNET`,
    ```
 
 3. **Send `result.warnings` + `timeDeltaMs` to your backend** for risk
-   scoring if you need audit trails.
+   scoring if you need audit trails (optional — the plugin works fully
+   client-side).
 
 ## Recommended policy
 
@@ -131,26 +130,22 @@ The plugin manifest already declares `INTERNET`,
 
 ## Hardening
 
-- **Play Integrity API** (integrated, optional): set
-  `playIntegrityCloudProjectNumber` in `GeoTimeConfig` and the plugin
-  returns `result.integrityToken`. Send it to your backend, decrypt via
-  Google (`IntegrityTokenResponse`), and check
-  `deviceRecognitionVerdict` contains `MEETS_DEVICE_INTEGRITY`. Map a
-  failed verdict to `deviceIntegrity` on the server side — **never decode
-  the token on-device**. The nonce is generated locally, so for replay
-  protection issue the nonce from your backend (requires a small API
-  addition — currently not exposed).
 - **Radius fairness**: `outOfRadius` only fails when
   `distance − accuracy > radius`, so a legitimate user at the edge with
   a noisy fix isn't rejected.
-- **Server-side verdict**: for high-stakes check-ins, send
-  `{ warnings, timeDeltaMs, accuracyMeters, distanceMeters,
-  integrityToken }` to your backend and let it decide — device-reported
-  signals can all be faked on rooted devices.
 - **Boot-anchor upgrade**: the persisted anchor re-anchors silently
   within 5 minutes after a reboot — a clock change in that window is
   undetected (see `shortcut:` comment in `NetworkTimeChecker`). Server-side
   anchoring removes this gap.
+
+### Deliberately not included
+
+- **Play Integrity API**: its verdict must be verified server-side, and
+  devices with a tripped Knox warranty bit (e.g. previously
+  bootloader-unlocked Samsung phones — often legitimate second-hand
+  devices) fail `MEETS_DEVICE_INTEGRITY`. Accepting that edge case for
+  now keeps client-side checks self-contained and avoids blocking real
+  users. Revisit when a backend verdict path exists.
 
 ## Limitations — read before shipping
 

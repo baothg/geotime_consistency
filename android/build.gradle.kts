@@ -74,7 +74,6 @@ kotlin {
 dependencies {
     implementation("androidx.core:core:1.13.1")
     implementation("com.google.android.gms:play-services-location:21.3.0")
-    implementation("com.google.android.play:integrity:1.4.0")
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.9.0")
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-play-services:1.9.0")
     testImplementation("org.jetbrains.kotlin:kotlin-test")
