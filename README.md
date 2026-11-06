@@ -113,9 +113,48 @@ The plugin manifest already declares `INTERNET`,
    }
    ```
 
-3. **Send `result.warnings` + `timeDeltaMs` to your backend** for risk
-   scoring if you need audit trails (optional — the plugin works fully
-   client-side).
+3. **Log results to Crashlytics** — the plugin never logs by itself.
+   Spec below.
+
+## Logging spec (Crashlytics)
+
+The plugin is silent — the client decides what to record. Recommended
+rules:
+
+| `status` | Record? | How |
+|---|---|---|
+| `pass` | No | Success = noise |
+| `fail` | **Non-fatal** `recordError` | `Exception('geotime_consistency_fail')`, keys below + `failureReasons` joined |
+| `inconclusive` | **Non-fatal** `recordError` only if ≥3 in a row per user | `Exception('geotime_consistency_inconclusive')` + `errorMessage` — sporadic weak GPS is normal, persistent is a device/config problem |
+| `noNetwork` | No | UX retry flow; logging adds nothing |
+| `error` | **Non-fatal** `recordError` | `Exception('geotime_consistency_error')` + `errorMessage` |
+
+Always attach these custom keys (both `recordError` calls):
+
+```dart
+FirebaseCrashlytics.instance.setCustomKey('gtc_reasons', result.failureReasons.join(','));
+FirebaseCrashlytics.instance.setCustomKey('gtc_warnings', result.warnings.join(','));
+FirebaseCrashlytics.instance.setCustomKey('gtc_time_delta_ms', result.timeDeltaMs ?? -1);
+FirebaseCrashlytics.instance.setCustomKey('gtc_distance_m', result.distanceMeters ?? -1);
+FirebaseCrashlytics.instance.setCustomKey('gtc_accuracy_m', result.accuracyMeters ?? -1);
+```
+
+**Privacy rules — do NOT log:**
+
+- Raw latitude/longitude (PII). `distanceMeters`/`accuracyMeters` are
+  enough to debug.
+- `serverTime`/`deviceTime` are safe but useless alone — `timeDeltaMs`
+  is the only time field worth logging.
+- `warnings` are fine (no PII) but only meaningful alongside a fail /
+  repeated inconclusive — attaching them to every event is noise.
+
+**Why these statuses matter in the dashboard:**
+
+- `fail` non-fatals = your cheat-detection hit rate. A spike usually
+  means a popular fake-GPS app shipped an update, not a bug.
+- `inconclusive` clusters on one device model/OS version = a real
+  plugin problem (e.g. an OEM breaking `getCurrentLocation`).
+- `error` non-fatals = integration bugs; these should trend to zero.
 
 ## Recommended policy
 
