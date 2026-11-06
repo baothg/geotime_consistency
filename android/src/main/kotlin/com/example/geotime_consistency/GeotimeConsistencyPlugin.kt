@@ -21,6 +21,7 @@ class GeotimeConsistencyPlugin :
     private lateinit var channel: MethodChannel
     private lateinit var appContext: Context
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main)
+    private val validating = java.util.concurrent.atomic.AtomicBoolean(false)
 
     override fun onAttachedToEngine(binding: FlutterPlugin.FlutterPluginBinding) {
         appContext = binding.applicationContext
@@ -31,6 +32,18 @@ class GeotimeConsistencyPlugin :
     override fun onMethodCall(call: MethodCall, result: Result) {
         if (call.method != "validate") {
             result.notImplemented()
+            return
+        }
+        // Re-entrancy guard: rapid retries must not stack validations.
+        if (!validating.compareAndSet(false, true)) {
+            result.success(
+                mapOf(
+                    "status" to "error",
+                    "failureReasons" to emptyList<String>(),
+                    "warnings" to emptyList<String>(),
+                    "errorMessage" to "A validation is already in progress",
+                )
+            )
             return
         }
         scope.launch {
@@ -45,6 +58,8 @@ class GeotimeConsistencyPlugin :
                         "errorMessage" to (e.message ?: e.toString()),
                     )
                 )
+            } finally {
+                validating.set(false)
             }
         }
     }
@@ -64,7 +79,7 @@ class GeotimeConsistencyPlugin :
         val maxAccuracy = call.argument<Number>("maxAccuracyMeters")?.toDouble() ?: 100.0
         val timeoutMs = call.argument<Number>("networkTimeoutMs")?.toInt() ?: 5_000
 
-        // 1. Network gate + trusted time (HTTP race SNTP).
+        // 1. Network gate + trusted time (HTTPS → SNTP → GNSS fallback).
         val time = NetworkTimeChecker.check(
             appContext, endpoints, sntpServers, timeoutMs, toleranceMs
         )
@@ -94,6 +109,8 @@ class GeotimeConsistencyPlugin :
             val gnssDelta = System.currentTimeMillis() - loc.gnssTimeMs
             deltaMs = gnssDelta
             if (kotlin.math.abs(gnssDelta) > toleranceMs) clockTampered = true
+            // GNSS is a verified source — certify the boot anchor with it.
+            NetworkTimeChecker.recordTrustedTime(appContext, loc.gnssTimeMs)
         }
 
         val failures = mutableListOf<String>()

@@ -42,6 +42,18 @@ Trusted time comes from up to 3 independent sources:
 If all three are unreachable → `timeSourceUnreachable` (log, don't
 block). The local boot-anchor check still runs in every case.
 
+Time-source fetching has a 12s overall budget; blocked sockets are
+force-closed on expiry (per-request timeouts are capped at 3s). A
+re-entrancy guard rejects a second `validate()` while one is running.
+
+### Trusted boot anchor
+
+The persisted boot anchor is written **only from verified sources**
+(HTTPS/SNTP/GNSS): `anchor = trustedTime − elapsedRealtime`. An
+unverified wall clock can never poison it, and a forged SNTP answer is
+corroborated against the last trusted anchor — an attacker must defeat
+that too, not just reply faster.
+
 ### HTTPS time endpoints
 
 **Default endpoints** (tried in order, first success wins — all return a
