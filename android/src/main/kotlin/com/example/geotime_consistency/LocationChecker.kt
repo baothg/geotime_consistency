@@ -71,6 +71,12 @@ object LocationChecker {
                 return fail(Outcome.NO_FIX, "Location fix timed out",
                     gnssTime = gnssTime.result())
             }
+        } catch (e: kotlinx.coroutines.CancellationException) {
+            // Callers cancel us on noNetwork — the GMS request must die
+            // too or GPS keeps draining the battery in the background.
+            cts.cancel()
+            unregisterGnss(lm, gnssTime)
+            throw e
         } catch (e: Exception) {
             unregisterGnss(lm, gnssTime)
             return fail(Outcome.NO_FIX, e.message, gnssTime = gnssTime.result())
@@ -114,7 +120,9 @@ object LocationChecker {
                 // GPS time since GPS epoch (1980-01-06); convert to Unix ms.
                 // biasNanos is Double — round the whole conversion once.
                 val gpsNs = clock.timeNanos - clock.fullBiasNanos - clock.biasNanos
-                val leapS = if (clock.hasLeapSecond()) clock.leapSecond.toLong() else 0L
+                // GPS-UTC offset has been 18s since 2017; many chips never
+                // report leapSecond, so absence must mean 18, not 0.
+                val leapS = if (clock.hasLeapSecond()) clock.leapSecond.toLong() else 18L
                 val utcMs = (gpsNs / 1_000_000).toLong() + GPS_EPOCH_OFFSET_MS - leapS * 1000
                 // Sanity: reject garbage clocks some OEMs emit. Bound must
                 // be absolute — comparing against the device clock would
