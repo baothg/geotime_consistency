@@ -6,7 +6,9 @@ import io.flutter.plugin.common.MethodCall
 import io.flutter.plugin.common.MethodChannel
 import io.flutter.plugin.common.MethodChannel.MethodCallHandler
 import io.flutter.plugin.common.MethodChannel.Result
+import kotlin.coroutines.coroutineContext
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.async
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
@@ -79,11 +81,28 @@ class GeotimeConsistencyPlugin :
         val maxAccuracy = call.argument<Number>("maxAccuracyMeters")?.toDouble() ?: 100.0
         val timeoutMs = call.argument<Number>("networkTimeoutMs")?.toInt() ?: 5_000
 
-        // 1. Network gate + trusted time (HTTPS → SNTP → GNSS fallback).
-        val time = NetworkTimeChecker.check(
-            appContext, endpoints, sntpServers, timeoutMs, toleranceMs
-        )
+        // The three checks are independent — run them concurrently on the
+        // caller's scope: worst case becomes max(12s time budget, 15s
+        // fix) not the sum.
+        val timeDeferred = kotlinx.coroutines.CoroutineScope(coroutineContext).async {
+            NetworkTimeChecker.check(
+                appContext, endpoints, sntpServers, timeoutMs, toleranceMs
+            )
+        }
+        val integrityDeferred = kotlinx.coroutines.CoroutineScope(coroutineContext).async {
+            // Local signals spawn `which su`/`getprop` processes —
+            // keep off the UI thread.
+            withContext(Dispatchers.IO) { IntegrityChecker.check(appContext) }
+        }
+        val locDeferred = kotlinx.coroutines.CoroutineScope(coroutineContext).async {
+            LocationChecker.check(appContext, targetLat, targetLng)
+        }
+
+        // Network gate — fail fast without waiting for the location fix.
+        val time = timeDeferred.await()
         if (!time.networkAvailable) {
+            locDeferred.cancel()
+            integrityDeferred.cancel()
             return mapOf(
                 "status" to "noNetwork",
                 "failureReasons" to emptyList<String>(),
@@ -91,13 +110,8 @@ class GeotimeConsistencyPlugin :
                 "deviceTimeMs" to time.deviceTimeMs,
             )
         }
-
-        // 2. Device integrity (local signals — spawns `which su`/`getprop`
-        //    processes; keep off the UI thread).
-        val integrity = withContext(Dispatchers.IO) { IntegrityChecker.check(appContext) }
-
-        // 3. Location fix + mock + radius (+ GNSS clock captured along the way).
-        val loc = LocationChecker.check(appContext, targetLat, targetLng)
+        val integrity = integrityDeferred.await()
+        val loc = locDeferred.await()
 
         // 4. GNSS satellite clock — fully offline backstop when every
         //    network time source failed.

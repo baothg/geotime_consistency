@@ -137,7 +137,11 @@ object LocationChecker {
     private class GnssTime {
         var callback: GnssMeasurementsEvent.Callback? = null
         val deferred = CompletableDeferred<Long>()
-        fun result(): Long? = if (deferred.isCompleted) deferred.getCompleted() else null
+        fun result(): Long? = try {
+            deferred.getCompleted()
+        } catch (_: Exception) {
+            null
+        }
     }
 
     private fun unregisterGnss(lm: LocationManager, box: GnssTime) {

@@ -75,7 +75,7 @@ object NetworkTimeChecker {
 
         // The trusted anchor is the local backstop — it must run even
         // when every remote source is dead.
-        val anchorTampered = checkTrustedAnchor(context, deviceTime, toleranceMs)
+        val anchorTampered = checkTrustedAnchor(context, toleranceMs)
 
         // Network is validated but every time source failed — report
         // networkAvailable=true with no server time so the caller can
@@ -249,13 +249,15 @@ object NetworkTimeChecker {
      * window before the next trusted validation. Upgrade: server-side
      * anchoring.
      */
-    private fun checkTrustedAnchor(context: Context, nowMs: Long, toleranceMs: Long): Boolean {
+    private fun checkTrustedAnchor(context: Context, toleranceMs: Long): Boolean {
         if (SystemClock.elapsedRealtime() < FRESH_BOOT_MS) return false
         val prefs = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
         val trusted = prefs.getLong(KEY_TRUSTED_ANCHOR, Long.MIN_VALUE)
         if (trusted == Long.MIN_VALUE) return false
 
-        val wallAnchor = nowMs - SystemClock.elapsedRealtime()
+        // Wall anchor sampled here — the two clocks must be read together
+        // or the check's own duration leaks into the anchor.
+        val wallAnchor = System.currentTimeMillis() - SystemClock.elapsedRealtime()
         return kotlin.math.abs(wallAnchor - trusted) > toleranceMs
     }
 }
