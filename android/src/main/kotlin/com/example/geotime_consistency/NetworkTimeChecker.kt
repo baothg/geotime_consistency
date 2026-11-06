@@ -101,13 +101,15 @@ object NetworkTimeChecker {
 
         val now = System.currentTimeMillis()
         val delta = now - source.ms
-        val clockTampered = kotlin.math.abs(delta) > toleranceMs
+        // HTTPS is unforgeable on-path, so it overrides the anchor outright
+        // (that's what heals stale anchors). SNTP is forgeable — a forged
+        // reply matching a spoofed clock must still be caught by the
+        // trusted anchor, so the anchor check stays for SNTP only.
+        val clockTampered = kotlin.math.abs(delta) > toleranceMs ||
+            (!source.viaHttps && anchorTampered)
 
-        // A trusted source agreeing with the wall clock overrides a stale
-        // anchor entirely — otherwise a wrong anchor (e.g. one stored
-        // before BOOT_COUNT tracking existed, then a reboot) would lock
-        // honest users into timeSpoofed forever. Only HTTPS may write the
-        // anchor — SNTP is forgeable and must never re-seed it.
+        // Only HTTPS may write the anchor — SNTP is forgeable and must
+        // never re-seed it.
         if (!clockTampered && source.viaHttps) {
             recordTrustedTime(context, source.ms)
         }
