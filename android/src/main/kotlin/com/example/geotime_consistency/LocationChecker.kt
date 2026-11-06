@@ -25,6 +25,8 @@ object LocationChecker {
     data class Result(
         val outcome: Outcome,
         val isMock: Boolean,
+        val latitude: Double?,
+        val longitude: Double?,
         val accuracyMeters: Float?,
         val distanceMeters: Float?,
         val errorMessage: String?,
@@ -36,11 +38,11 @@ object LocationChecker {
         targetLng: Double,
     ): Result {
         if (!hasLocationPermission(context)) {
-            return Result(Outcome.NO_PERMISSION, false, null, null,
+            return Result(Outcome.NO_PERMISSION, false, null, null, null, null,
                 "Location permission not granted")
         }
         if (!isLocationEnabled(context)) {
-            return Result(Outcome.LOCATION_OFF, false, null, null,
+            return Result(Outcome.LOCATION_OFF, false, null, null, null, null,
                 "Location services disabled")
         }
 
@@ -57,11 +59,11 @@ object LocationChecker {
             }
             if (fix == null) {
                 cts.cancel()
-                return Result(Outcome.NO_FIX, false, null, null, "Location fix timed out")
+                return Result(Outcome.NO_FIX, false, null, null, null, null, "Location fix timed out")
             }
             fix
         } catch (e: Exception) {
-            return Result(Outcome.NO_FIX, false, null, null, e.message)
+            return Result(Outcome.NO_FIX, false, null, null, null, null, e.message)
         }
 
         val target = Location("target").apply {
@@ -71,6 +73,8 @@ object LocationChecker {
         return Result(
             outcome = Outcome.OK,
             isMock = isMock(location),
+            latitude = location.latitude,
+            longitude = location.longitude,
             accuracyMeters = if (location.hasAccuracy()) location.accuracy else null,
             distanceMeters = location.distanceTo(target),
             errorMessage = null,

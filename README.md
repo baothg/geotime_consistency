@@ -113,7 +113,13 @@ The plugin manifest already declares `INTERNET`,
    }
    ```
 
-3. **Log results to Crashlytics** — the plugin never logs by itself.
+3. **Reuse the validated values.** The result already carries
+   `serverTime` (trusted UTC), `latitude`/`longitude` (the verified
+   fix), `timeDeltaMs`, `distanceMeters`, `accuracyMeters` — use these
+   as the source of truth for check-in payloads or cross-checks; do not
+   re-read the device clock or request a second location fix.
+
+4. **Log results to Crashlytics** — the plugin never logs by itself.
    Spec below.
 
 ## Logging spec (Crashlytics)

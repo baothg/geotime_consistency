@@ -124,6 +124,8 @@ class GeotimeConsistencyPlugin :
             "serverTimeMs" to time.serverTimeMs,
             "deviceTimeMs" to time.deviceTimeMs,
             "timeDeltaMs" to time.deltaMs,
+            "latitude" to loc.latitude,
+            "longitude" to loc.longitude,
             "accuracyMeters" to loc.accuracyMeters?.toDouble(),
             "distanceMeters" to loc.distanceMeters?.toDouble(),
             "errorMessage" to errorMessage,

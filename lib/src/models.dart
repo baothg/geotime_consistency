@@ -134,6 +134,8 @@ class GeoTimeResult {
     this.serverTime,
     this.deviceTime,
     this.timeDeltaMs,
+    this.latitude,
+    this.longitude,
     this.accuracyMeters,
     this.distanceMeters,
     this.errorMessage,
@@ -156,6 +158,8 @@ class GeoTimeResult {
         serverTime: _millisToDate(m['serverTimeMs']),
         deviceTime: _millisToDate(m['deviceTimeMs']),
         timeDeltaMs: (m['timeDeltaMs'] as num?)?.toInt(),
+        latitude: (m['latitude'] as num?)?.toDouble(),
+        longitude: (m['longitude'] as num?)?.toDouble(),
         accuracyMeters: (m['accuracyMeters'] as num?)?.toDouble(),
         distanceMeters: (m['distanceMeters'] as num?)?.toDouble(),
         errorMessage: m['errorMessage'] as String?,
@@ -180,6 +184,12 @@ class GeoTimeResult {
 
   /// Signed difference `deviceTime - serverTime`, latency-corrected.
   final int? timeDeltaMs;
+
+  /// Validated coordinates of the fix used for the radius check.
+  /// Present whenever a fix was obtained (even on `inconclusive`) — the
+  /// client may use or cross-check them. Absent when no fix exists.
+  final double? latitude;
+  final double? longitude;
 
   /// Horizontal accuracy of the location fix used, in meters.
   final double? accuracyMeters;
