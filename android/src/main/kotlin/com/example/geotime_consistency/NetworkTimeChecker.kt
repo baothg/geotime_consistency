@@ -51,6 +51,8 @@ object NetworkTimeChecker {
     data class Result(
         val networkAvailable: Boolean,
         val serverTimeMs: Long?,
+        /** True when [serverTimeMs] came from HTTPS; false = SNTP. */
+        val viaHttps: Boolean,
         val deviceTimeMs: Long?,
         val deltaMs: Long?,
         val clockTampered: Boolean,
@@ -66,7 +68,7 @@ object NetworkTimeChecker {
         val deviceTime = System.currentTimeMillis()
 
         if (!hasValidatedNetwork(context)) {
-            return@withContext Result(false, null, deviceTime, null, false)
+            return@withContext Result(false, null, false, deviceTime, null, false)
         }
 
         // Fetch in a separate async: blocked sockets/connections ignore
@@ -96,7 +98,7 @@ object NetworkTimeChecker {
         // networkAvailable=true with no server time so the caller can
         // distinguish this from an actual offline state (and try GNSS).
         if (source == null) {
-            return@withContext Result(true, null, deviceTime, null, anchorTampered)
+            return@withContext Result(true, null, false, deviceTime, null, anchorTampered)
         }
 
         val now = System.currentTimeMillis()
@@ -114,7 +116,7 @@ object NetworkTimeChecker {
             recordTrustedTime(context, source.ms)
         }
 
-        Result(true, source.ms, now, delta, clockTampered)
+        Result(true, source.ms, source.viaHttps, now, delta, clockTampered)
     }
 
     /**

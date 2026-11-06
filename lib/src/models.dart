@@ -87,9 +87,10 @@ class GeoTimeConfig {
     'https://captive.apple.com',
   ];
 
-  /// SNTP servers (UDP 123) tried in parallel with the HTTPS chain —
-  /// a different failure domain, so a network that blocks the HTTPS
-  /// endpoints may still allow NTP.
+  /// SNTP servers (UDP 123) used as fallback when every HTTPS endpoint
+  /// fails — a different failure domain, so a network that blocks the
+  /// HTTPS endpoints may still allow NTP. Answers are corroborated
+  /// against the trusted boot anchor and the GNSS clock when available.
   static const defaultSntpServers = [
     'pool.ntp.org',
     'time.cloudflare.com',

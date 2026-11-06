@@ -118,6 +118,14 @@ class GeotimeConsistencyPlugin :
         var serverTimeMs = time.serverTimeMs
         var deltaMs = time.deltaMs
         var clockTampered = time.clockTampered
+        // SNTP is forgeable; when the satellite clock is also available,
+        // cross-check the SNTP answer against it — covers the post-reboot
+        // window where no trusted anchor exists yet.
+        if (serverTimeMs != null && !time.viaHttps && loc.gnssTimeMs != null &&
+            kotlin.math.abs(loc.gnssTimeMs - serverTimeMs) > toleranceMs
+        ) {
+            clockTampered = true
+        }
         if (serverTimeMs == null && loc.gnssTimeMs != null) {
             serverTimeMs = loc.gnssTimeMs
             val gnssDelta = System.currentTimeMillis() - loc.gnssTimeMs
