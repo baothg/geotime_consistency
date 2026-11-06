@@ -49,10 +49,11 @@ re-entrancy guard rejects a second `validate()` while one is running.
 ### Trusted boot anchor
 
 The persisted boot anchor is written **only from verified sources**
-(HTTPS/SNTP/GNSS): `anchor = trustedTime − elapsedRealtime`. An
-unverified wall clock can never poison it, and a forged SNTP answer is
-corroborated against the last trusted anchor — an attacker must defeat
-that too, not just reply faster.
+(HTTPS/SNTP/GNSS) and only when the check itself is untampered —
+`anchor = trustedTime − elapsedRealtime`, stored alongside Android's
+`BOOT_COUNT`. An unverified wall clock can never poison it, a forged
+SNTP answer can't re-seed it, and a reboot (BOOT_COUNT changed) voids
+the old anchor instead of false-flagging the user.
 
 ### HTTPS time endpoints
 

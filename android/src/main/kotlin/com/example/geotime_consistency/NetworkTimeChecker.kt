@@ -4,7 +4,10 @@ import android.content.Context
 import android.net.ConnectivityManager
 import android.net.NetworkCapabilities
 import android.os.SystemClock
+import kotlin.coroutines.coroutineContext
+import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.async
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
@@ -36,6 +39,7 @@ object NetworkTimeChecker {
 
     private const val PREFS = "geotime_consistency"
     private const val KEY_TRUSTED_ANCHOR = "trusted_boot_anchor_ms"
+    private const val KEY_BOOT_COUNT = "boot_count"
     // A real reboot resets elapsedRealtime; treat a fresh boot as a new anchor.
     private const val FRESH_BOOT_MS = 5 * 60 * 1000L
     private const val RETRY_DELAY_MS = 500L
@@ -64,13 +68,16 @@ object NetworkTimeChecker {
             return@withContext Result(false, null, deviceTime, null, false)
         }
 
-        // Blocked sockets/connections ignore coroutine cancellation, so
-        // every fetch registers a closer; on budget expiry we close them
-        // all, which unblocks the stranded I/O.
+        // Fetch in a detached async: blocked sockets/connections ignore
+        // coroutine cancellation, so withTimeoutOrNull around the call
+        // itself would still wait for them. Awaiting a separate deferred
+        // lets the deadline return immediately; the closers below then
+        // unblock the stranded I/O.
         val closers = CopyOnWriteArrayList<() -> Unit>()
-        val serverMs = withTimeoutOrNull(TOTAL_BUDGET_MS) {
+        val fetch = CoroutineScope(coroutineContext).async(Dispatchers.IO) {
             fetchTrustedTime(endpoints, sntpServers, timeoutMs, closers)
         }
+        val serverMs = withTimeoutOrNull(TOTAL_BUDGET_MS) { fetch.await() }
         closers.forEach { runCatching { it() } }
 
         // The trusted anchor is the local backstop — it must run even
@@ -84,11 +91,13 @@ object NetworkTimeChecker {
             return@withContext Result(true, null, deviceTime, null, anchorTampered)
         }
 
-        recordTrustedTime(context, serverMs)
-
         val now = System.currentTimeMillis()
         val delta = now - serverMs
         val clockTampered = kotlin.math.abs(delta) > toleranceMs || anchorTampered
+
+        // Only certify the anchor from an untampered result — a forged
+        // SNTP answer must not be allowed to re-seed the trusted anchor.
+        if (!clockTampered) recordTrustedTime(context, serverMs)
 
         Result(true, serverMs, now, delta, clockTampered)
     }
@@ -101,7 +110,10 @@ object NetworkTimeChecker {
     fun recordTrustedTime(context: Context, trustedMs: Long) {
         val anchor = trustedMs - SystemClock.elapsedRealtime()
         context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
-            .edit().putLong(KEY_TRUSTED_ANCHOR, anchor).apply()
+            .edit()
+            .putLong(KEY_TRUSTED_ANCHOR, anchor)
+            .putInt(KEY_BOOT_COUNT, bootCount(context))
+            .apply()
     }
 
     /**
@@ -168,10 +180,12 @@ object NetworkTimeChecker {
      * the protocol itself rather than a midpoint guess.
      */
     private fun fetchSntpTime(server: String, timeoutMs: Int, closers: MutableList<() -> Unit>): Long? {
-        val socket = DatagramSocket().apply { soTimeout = minOf(timeoutMs, PER_REQUEST_TIMEOUT_MS) }
-        val closer: () -> Unit = { socket.close() }
-        closers += closer
+        var socket: DatagramSocket? = null
+        val closer: () -> Unit = { socket?.close() }
         return try {
+            socket = DatagramSocket().apply { soTimeout = minOf(timeoutMs, PER_REQUEST_TIMEOUT_MS) }
+            closers += closer
+            val sock = socket!!
             val t1 = System.currentTimeMillis()
             val request = ByteArray(48).apply {
                 this[0] = 0x1B // LI=0, VN=4, Mode=3 (client)
@@ -184,9 +198,9 @@ object NetworkTimeChecker {
             // deadline — DNS has no socket timeout; the overall budget
             // bounds the result, not the stranded thread.
             val addr = InetAddress.getByName(server)
-            socket.send(DatagramPacket(request, request.size, addr, 123))
+            sock.send(DatagramPacket(request, request.size, addr, 123))
             val response = ByteArray(48)
-            socket.receive(DatagramPacket(response, response.size))
+            sock.receive(DatagramPacket(response, response.size))
             val t4 = System.currentTimeMillis()
 
             // Forgery guards: server-mode reply (mode 4), synchronised
@@ -210,7 +224,7 @@ object NetworkTimeChecker {
             null
         } finally {
             closers -= closer
-            socket.close()
+            socket?.close()
         }
     }
 
@@ -249,11 +263,52 @@ object NetworkTimeChecker {
      * window before the next trusted validation. Upgrade: server-side
      * anchoring.
      */
+    /**
+     * Android's own reboot counter. -1 when unavailable.
+     */
+    private fun bootCount(context: Context): Int {
+        return try {
+            android.provider.Settings.Global.getInt(
+                context.contentResolver,
+                android.provider.Settings.Global.BOOT_COUNT,
+                -1,
+            )
+        } catch (_: Exception) {
+            -1
+        }
+    }
+
+    /**
+     * Trusted boot anchor = the wall-clock boot instant as certified by a
+     * verified time source (recordTrustedTime). The CURRENT wall clock's
+     * boot instant is nowMs - elapsedRealtime; if it disagrees with the
+     * trusted anchor beyond tolerance, the clock was moved.
+     *
+     * Deliberately never written from an unverified clock — a spoofed
+     * first run cannot poison the anchor. Detection is skipped while
+     * uptime is low or when BOOT_COUNT shows a reboot happened since the
+     * anchor was stored: a reboot legitimately moves the wall anchor and
+     * must not flag honest users.
+     *
+     * shortcut: a reboot inside FRESH_BOOT_MS still creates a blind
+     * window before the next trusted validation. Upgrade: server-side
+     * anchoring.
+     */
     private fun checkTrustedAnchor(context: Context, toleranceMs: Long): Boolean {
         if (SystemClock.elapsedRealtime() < FRESH_BOOT_MS) return false
         val prefs = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
         val trusted = prefs.getLong(KEY_TRUSTED_ANCHOR, Long.MIN_VALUE)
         if (trusted == Long.MIN_VALUE) return false
+
+        // Anchor belongs to a previous boot — it can't match this boot's
+        // wall anchor even on an honest device.
+        val savedBootCount = prefs.getInt(KEY_BOOT_COUNT, -1)
+        val currentBootCount = bootCount(context)
+        if (savedBootCount != -1 && currentBootCount != -1 &&
+            savedBootCount != currentBootCount
+        ) {
+            return false
+        }
 
         // Wall anchor sampled here — the two clocks must be read together
         // or the check's own duration leaks into the anchor.
