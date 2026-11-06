@@ -10,12 +10,15 @@ import com.google.android.gms.location.LocationServices
 import com.google.android.gms.location.Priority
 import com.google.android.gms.tasks.CancellationTokenSource
 import kotlinx.coroutines.tasks.await
+import kotlinx.coroutines.withTimeoutOrNull
 
 /**
  * Location checks: fresh high-accuracy fix, mock-provider detection,
  * and distance-to-target.
  */
 object LocationChecker {
+
+    private const val FIX_TIMEOUT_MS = 15_000L
 
     enum class Outcome { OK, NO_PERMISSION, LOCATION_OFF, NO_FIX }
 
@@ -41,15 +44,25 @@ object LocationChecker {
                 "Location services disabled")
         }
 
+        // A high-accuracy fix can take a long time indoors/underground —
+        // never let validate() hang forever.
         val fused = LocationServices.getFusedLocationProviderClient(context)
+        val cts = CancellationTokenSource()
         val location: Location = try {
-            fused.getCurrentLocation(
-                Priority.PRIORITY_HIGH_ACCURACY,
-                CancellationTokenSource().token,
-            ).await()
+            val fix = withTimeoutOrNull(FIX_TIMEOUT_MS) {
+                fused.getCurrentLocation(
+                    Priority.PRIORITY_HIGH_ACCURACY,
+                    cts.token,
+                ).await()
+            }
+            if (fix == null) {
+                cts.cancel()
+                return Result(Outcome.NO_FIX, false, null, null, "Location fix timed out")
+            }
+            fix
         } catch (e: Exception) {
             return Result(Outcome.NO_FIX, false, null, null, e.message)
-        } ?: return Result(Outcome.NO_FIX, false, null, null, "Null location fix")
+        }
 
         val target = Location("target").apply {
             latitude = targetLat

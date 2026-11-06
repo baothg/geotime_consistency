@@ -60,9 +60,9 @@ enum WarningReason {
 
 GeoTimeStatus _parseStatus(String v) => GeoTimeStatus.values.asNameMap()[v] ?? GeoTimeStatus.error;
 
-FailureReason _parseFailure(String v) => FailureReason.values.asNameMap()[v]!;
+FailureReason? _parseFailure(String v) => FailureReason.values.asNameMap()[v];
 
-WarningReason _parseWarning(String v) => WarningReason.values.asNameMap()[v]!;
+WarningReason? _parseWarning(String v) => WarningReason.values.asNameMap()[v];
 
 /// Configuration for a single [GeotimeConsistency.validate] call.
 class GeoTimeConfig {
@@ -141,9 +141,18 @@ class GeoTimeResult {
 
   factory GeoTimeResult.fromMap(Map<dynamic, dynamic> m) => GeoTimeResult._(
         status: _parseStatus(m['status'] as String? ?? 'error'),
-        failureReasons:
-            (m['failureReasons'] as List?)?.map((e) => _parseFailure(e as String)).toList() ?? const [],
-        warnings: (m['warnings'] as List?)?.map((e) => _parseWarning(e as String)).toList() ?? const [],
+        // Drop unknown reason strings instead of throwing — a native side
+        // newer than this Dart API must not crash the client.
+        failureReasons: (m['failureReasons'] as List?)
+                ?.map((e) => e is String ? _parseFailure(e) : null)
+                .whereType<FailureReason>()
+                .toList() ??
+            const [],
+        warnings: (m['warnings'] as List?)
+                ?.map((e) => e is String ? _parseWarning(e) : null)
+                .whereType<WarningReason>()
+                .toList() ??
+            const [],
         serverTime: _millisToDate(m['serverTimeMs']),
         deviceTime: _millisToDate(m['deviceTimeMs']),
         timeDeltaMs: (m['timeDeltaMs'] as num?)?.toInt(),

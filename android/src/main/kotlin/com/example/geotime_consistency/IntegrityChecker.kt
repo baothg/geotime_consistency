@@ -75,7 +75,12 @@ object IntegrityChecker {
         val pm = context.packageManager
         return names.any {
             try {
-                pm.getPackageInfo(it, PackageManager.PackageInfoFlags.of(0))
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                    pm.getPackageInfo(it, PackageManager.PackageInfoFlags.of(0))
+                } else {
+                    @Suppress("DEPRECATION")
+                    pm.getPackageInfo(it, 0)
+                }
                 true
             } catch (_: PackageManager.NameNotFoundException) {
                 false
@@ -86,14 +91,20 @@ object IntegrityChecker {
     /**
      * Knox warranty bit. "0x0" = never tripped, "0x1" = bootloader was
      * unlocked at some point (may predate the current owner — warn only).
+     * Android system properties are not Java properties — read via getprop.
      */
     private fun isKnoxTripped(): Boolean {
+        return getProp("ro.boot.warranty_bit") == "1" ||
+            getProp("ro.warranty_bit") == "1"
+    }
+
+    private fun getProp(name: String): String? {
         return try {
-            val warranty = System.getProperty("ro.boot.warranty_bit")
-                ?: System.getProperty("ro.warranty_bit")
-            warranty == "1"
+            Runtime.getRuntime().exec(arrayOf("getprop", name))
+                .inputStream.bufferedReader().readLine()?.trim()
+                ?.takeIf { it.isNotEmpty() }
         } catch (_: Exception) {
-            false
+            null
         }
     }
 
