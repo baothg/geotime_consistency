@@ -23,6 +23,9 @@ object LocationChecker {
 
     private const val FIX_TIMEOUT_MS = 15_000L
     private const val GPS_EPOCH_OFFSET_MS = 315_964_800_000L // 1980-01-06
+    // Absolute plausibility window for GNSS-derived UTC.
+    private const val GNSS_PLAUSIBLE_MIN = 1_577_836_800_000L // 2020-01-01
+    private const val GNSS_PLAUSIBLE_MAX = 4_102_444_800_000L // 2100-01-01
 
     enum class Outcome { OK, NO_PERMISSION, LOCATION_OFF, NO_FIX }
 
@@ -113,9 +116,10 @@ object LocationChecker {
                 val gpsNs = clock.timeNanos - clock.fullBiasNanos - clock.biasNanos
                 val leapS = if (clock.hasLeapSecond()) clock.leapSecond.toLong() else 0L
                 val utcMs = (gpsNs / 1_000_000).toLong() + GPS_EPOCH_OFFSET_MS - leapS * 1000
-                // Sanity: reject garbage clocks some OEMs emit — accept only
-                // values within ±1 year of now.
-                if (kotlin.math.abs(utcMs - System.currentTimeMillis()) < 370L * 24 * 3600 * 1000) {
+                // Sanity: reject garbage clocks some OEMs emit. Bound must
+                // be absolute — comparing against the device clock would
+                // reject the real time exactly when it is spoofed.
+                if (utcMs in GNSS_PLAUSIBLE_MIN..GNSS_PLAUSIBLE_MAX) {
                     box.deferred.complete(utcMs)
                 }
             }
