@@ -60,6 +60,7 @@ class GeotimeConsistencyPlugin :
         val toleranceMs = call.argument<Number>("timeToleranceMs")?.toLong() ?: 60_000L
         val maxAccuracy = call.argument<Number>("maxAccuracyMeters")?.toDouble() ?: 100.0
         val timeoutMs = call.argument<Number>("networkTimeoutMs")?.toInt() ?: 5_000
+        val cloudProject = call.argument<Number>("playIntegrityCloudProjectNumber")?.toLong()
 
         // 1. Network gate — everything else needs it.
         val time = NetworkTimeChecker.check(appContext, endpoints, timeoutMs, toleranceMs)
@@ -77,6 +78,10 @@ class GeotimeConsistencyPlugin :
 
         // 3. Location fix + mock + radius.
         val loc = LocationChecker.check(appContext, targetLat, targetLng)
+
+        // 4. Play Integrity token (optional — verdict must be checked
+        //    server-side; only the token is returned here).
+        val integrityToken = cloudProject?.let { PlayIntegrityChecker.token(appContext, it) }
 
         val failures = mutableListOf<String>()
         val warnings = mutableListOf<String>()
@@ -97,10 +102,14 @@ class GeotimeConsistencyPlugin :
                     failures += "mockLocation"
                 } else {
                     val accuracy = loc.accuracyMeters
-                    if (accuracy != null && accuracy > maxAccuracy) {
-                        status = "inconclusive"
-                    } else if ((loc.distanceMeters ?: Float.MAX_VALUE) > radius) {
-                        failures += "outOfRadius"
+                    when {
+                        accuracy != null && accuracy > maxAccuracy ->
+                            status = "inconclusive"
+                        // Fail only when outside the radius beyond the fix's
+                        // own uncertainty — a user at the radius edge with a
+                        // wobbly fix is not a cheater.
+                        (loc.distanceMeters ?: Float.MAX_VALUE) - (accuracy ?: 0f) > radius ->
+                            failures += "outOfRadius"
                     }
                 }
             }
@@ -122,6 +131,7 @@ class GeotimeConsistencyPlugin :
             "timeDeltaMs" to time.deltaMs,
             "accuracyMeters" to loc.accuracyMeters?.toDouble(),
             "distanceMeters" to loc.distanceMeters?.toDouble(),
+            "integrityToken" to integrityToken,
             "errorMessage" to errorMessage,
         )
     }

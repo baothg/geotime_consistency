@@ -94,6 +94,7 @@ class GeoTimeConfig {
     this.timeTolerance = const Duration(seconds: 60),
     this.maxAccuracyMeters = 100,
     this.networkTimeout = const Duration(seconds: 5),
+    this.playIntegrityCloudProjectNumber,
   });
 
   /// Trusted HTTPS URLs whose `Date` response header is used as server
@@ -119,7 +120,15 @@ class GeoTimeConfig {
   /// Timeout for the server-time request.
   final Duration networkTimeout;
 
-  Map<String, Object> toMap() => {
+  /// Google Cloud project number linked to Play Console (Play Integrity
+  /// API → Google Cloud Project). When set, the plugin requests an
+  /// integrity token and returns it as [GeoTimeResult.integrityToken]
+  /// for your **backend** to decrypt and verify — the verdict cannot be
+  /// trusted if decoded on-device. When null, the request is skipped
+  /// (Play Services optional).
+  final int? playIntegrityCloudProjectNumber;
+
+  Map<String, Object?> toMap() => {
         'timeEndpoints': timeEndpoints,
         'targetLatitude': targetLatitude,
         'targetLongitude': targetLongitude,
@@ -127,6 +136,7 @@ class GeoTimeConfig {
         'timeToleranceMs': timeTolerance.inMilliseconds,
         'maxAccuracyMeters': maxAccuracyMeters,
         'networkTimeoutMs': networkTimeout.inMilliseconds,
+        'playIntegrityCloudProjectNumber': playIntegrityCloudProjectNumber,
       };
 }
 
@@ -141,6 +151,7 @@ class GeoTimeResult {
     this.timeDeltaMs,
     this.accuracyMeters,
     this.distanceMeters,
+    this.integrityToken,
     this.errorMessage,
   });
 
@@ -154,6 +165,7 @@ class GeoTimeResult {
         timeDeltaMs: (m['timeDeltaMs'] as num?)?.toInt(),
         accuracyMeters: (m['accuracyMeters'] as num?)?.toDouble(),
         distanceMeters: (m['distanceMeters'] as num?)?.toDouble(),
+        integrityToken: m['integrityToken'] as String?,
         errorMessage: m['errorMessage'] as String?,
       );
 
@@ -182,6 +194,11 @@ class GeoTimeResult {
 
   /// Distance between current location and the target, in meters.
   final double? distanceMeters;
+
+  /// Play Integrity token — send to your backend to decrypt & verify
+  /// (`deviceIntegrity`, `appLicensingVerdict`). Only present when
+  /// [GeoTimeConfig.playIntegrityCloudProjectNumber] was set.
+  final String? integrityToken;
 
   /// Populated when [status] is [GeoTimeStatus.error].
   final String? errorMessage;

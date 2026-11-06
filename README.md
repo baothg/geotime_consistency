@@ -129,12 +129,24 @@ The plugin manifest already declares `INTERNET`,
 - `radiusMeters`: GPS accuracy outdoors is typically 5–50 m; a radius
   below ~50 m will cause legitimate rejections.
 
-## Hardening options (not built in)
+## Hardening
 
-- **Play Integrity API**: add `com.google.android.play:integrity`,
-  request an integrity token with a server-provided nonce, verify
-  server-side, map failure to `deviceIntegrity`. Stronger than local
-  root checks; bypassed only by sophisticated setups.
+- **Play Integrity API** (integrated, optional): set
+  `playIntegrityCloudProjectNumber` in `GeoTimeConfig` and the plugin
+  returns `result.integrityToken`. Send it to your backend, decrypt via
+  Google (`IntegrityTokenResponse`), and check
+  `deviceRecognitionVerdict` contains `MEETS_DEVICE_INTEGRITY`. Map a
+  failed verdict to `deviceIntegrity` on the server side — **never decode
+  the token on-device**. The nonce is generated locally, so for replay
+  protection issue the nonce from your backend (requires a small API
+  addition — currently not exposed).
+- **Radius fairness**: `outOfRadius` only fails when
+  `distance − accuracy > radius`, so a legitimate user at the edge with
+  a noisy fix isn't rejected.
+- **Server-side verdict**: for high-stakes check-ins, send
+  `{ warnings, timeDeltaMs, accuracyMeters, distanceMeters,
+  integrityToken }` to your backend and let it decide — device-reported
+  signals can all be faked on rooted devices.
 - **Boot-anchor upgrade**: the persisted anchor re-anchors silently
   within 5 minutes after a reboot — a clock change in that window is
   undetected (see `shortcut:` comment in `NetworkTimeChecker`). Server-side
