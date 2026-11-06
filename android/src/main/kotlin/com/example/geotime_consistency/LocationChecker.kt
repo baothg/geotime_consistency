@@ -2,6 +2,7 @@ package com.example.geotime_consistency
 
 import android.content.Context
 import android.content.pm.PackageManager
+import android.location.GnssMeasurementsEvent
 import android.location.Location
 import android.location.LocationManager
 import android.os.Build
@@ -9,16 +10,19 @@ import androidx.core.content.ContextCompat
 import com.google.android.gms.location.LocationServices
 import com.google.android.gms.location.Priority
 import com.google.android.gms.tasks.CancellationTokenSource
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.tasks.await
 import kotlinx.coroutines.withTimeoutOrNull
 
 /**
  * Location checks: fresh high-accuracy fix, mock-provider detection,
- * and distance-to-target.
+ * and distance-to-target. Also captures the GNSS satellite clock while
+ * the fix is running — a fully offline trusted-time backstop.
  */
 object LocationChecker {
 
     private const val FIX_TIMEOUT_MS = 15_000L
+    private const val GPS_EPOCH_OFFSET_MS = 315_964_800_000L // 1980-01-06
 
     enum class Outcome { OK, NO_PERMISSION, LOCATION_OFF, NO_FIX }
 
@@ -29,6 +33,7 @@ object LocationChecker {
         val longitude: Double?,
         val accuracyMeters: Float?,
         val distanceMeters: Float?,
+        val gnssTimeMs: Long?,
         val errorMessage: String?,
     )
 
@@ -38,33 +43,36 @@ object LocationChecker {
         targetLng: Double,
     ): Result {
         if (!hasLocationPermission(context)) {
-            return Result(Outcome.NO_PERMISSION, false, null, null, null, null,
-                "Location permission not granted")
+            return fail(Outcome.NO_PERMISSION, "Location permission not granted")
         }
         if (!isLocationEnabled(context)) {
-            return Result(Outcome.LOCATION_OFF, false, null, null, null, null,
-                "Location services disabled")
+            return fail(Outcome.LOCATION_OFF, "Location services disabled")
         }
+
+        val lm = context.getSystemService(Context.LOCATION_SERVICE) as LocationManager
+        val gnssTime = listenGnssClock(lm)
 
         // A high-accuracy fix can take a long time indoors/underground —
         // never let validate() hang forever.
         val fused = LocationServices.getFusedLocationProviderClient(context)
         val cts = CancellationTokenSource()
         val location: Location = try {
-            val fix = withTimeoutOrNull(FIX_TIMEOUT_MS) {
+            withTimeoutOrNull(FIX_TIMEOUT_MS) {
                 fused.getCurrentLocation(
                     Priority.PRIORITY_HIGH_ACCURACY,
                     cts.token,
                 ).await()
-            }
-            if (fix == null) {
+            } ?: run {
                 cts.cancel()
-                return Result(Outcome.NO_FIX, false, null, null, null, null, "Location fix timed out")
+                unregisterGnss(lm, gnssTime)
+                return fail(Outcome.NO_FIX, "Location fix timed out",
+                    gnssTime = gnssTime.result())
             }
-            fix
         } catch (e: Exception) {
-            return Result(Outcome.NO_FIX, false, null, null, null, null, e.message)
+            unregisterGnss(lm, gnssTime)
+            return fail(Outcome.NO_FIX, e.message, gnssTime = gnssTime.result())
         }
+        unregisterGnss(lm, gnssTime)
 
         val target = Location("target").apply {
             latitude = targetLat
@@ -77,8 +85,64 @@ object LocationChecker {
             longitude = location.longitude,
             accuracyMeters = if (location.hasAccuracy()) location.accuracy else null,
             distanceMeters = location.distanceTo(target),
+            gnssTimeMs = gnssTime.result(),
             errorMessage = null,
         )
+    }
+
+    private fun fail(outcome: Outcome, message: String?, gnssTime: Long? = null) =
+        Result(outcome, false, null, null, null, null, gnssTime, message)
+
+    /**
+     * Subscribes to GNSS measurement events and completes [GnssTime.box]
+     * with the first usable satellite clock (UTC estimate).
+     *
+     * utcTime = clock.timeNanos − fullBiasNanos − biasNanos − leapSecond
+     * converted to wall-clock epoch. Requires FINE permission and real
+     * satellite visibility; stays null indoors — that is expected.
+     */
+    private fun listenGnssClock(lm: LocationManager): GnssTime {
+        val box = GnssTime()
+        box.callback = object : GnssMeasurementsEvent.Callback() {
+            override fun onGnssMeasurementsReceived(event: GnssMeasurementsEvent) {
+                if (box.deferred.isCompleted) return
+                val clock = event.clock
+                if (!clock.hasFullBiasNanos() || !clock.hasBiasNanos()) return
+                // GPS time since GPS epoch (1980-01-06); convert to Unix ms.
+                // biasNanos is Double — round the whole conversion once.
+                val gpsNs = clock.timeNanos - clock.fullBiasNanos - clock.biasNanos
+                val leapS = if (clock.hasLeapSecond()) clock.leapSecond.toLong() else 0L
+                val utcMs = (gpsNs / 1_000_000).toLong() + GPS_EPOCH_OFFSET_MS - leapS * 1000
+                // Sanity: reject garbage clocks some OEMs emit — accept only
+                // values within ±1 year of now.
+                if (kotlin.math.abs(utcMs - System.currentTimeMillis()) < 370L * 24 * 3600 * 1000) {
+                    box.deferred.complete(utcMs)
+                }
+            }
+        }
+        val callback = box.callback
+        try {
+            if (callback != null) lm.registerGnssMeasurementsCallback(callback)
+        } catch (_: Exception) {
+            // No FINE permission, unsupported chipset — GNSS stays null.
+            box.callback = null
+        }
+        return box
+    }
+
+    private class GnssTime {
+        var callback: GnssMeasurementsEvent.Callback? = null
+        val deferred = CompletableDeferred<Long>()
+        fun result(): Long? = if (deferred.isCompleted) deferred.getCompleted() else null
+    }
+
+    private fun unregisterGnss(lm: LocationManager, box: GnssTime) {
+        box.callback?.let {
+            try {
+                lm.unregisterGnssMeasurementsCallback(it)
+            } catch (_: Exception) {
+            }
+        }
     }
 
     private fun isMock(location: Location): Boolean {

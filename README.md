@@ -13,7 +13,7 @@ an iOS implementation can be added without breaking changes).
 |---|---|---|
 | Network | `NET_CAPABILITY_VALIDATED` + a real request to your trusted endpoint | `noNetwork` gate — everything else requires it |
 | Root | `su` binaries, `test-keys`, Magisk/SuperSU packages, `which su` | `failureReasons: [rooted]` |
-| Server time | Reads the `Date` header of an HTTPS request to **your** endpoint; latency-corrected via `elapsedRealtime` midpoint | `failureReasons: [timeSpoofed]` when \|device − server\| > tolerance |
+| Server time | Layered trusted sources: **(HTTPS `Date` race SNTP/UDP-123) → GNSS satellite clock** — different failure domains; first to answer wins | `failureReasons: [timeSpoofed]` when \|device − source\| > tolerance |
 | Clock changed mid-session | Boot anchor `wallClock − elapsedRealtime` persisted in SharedPreferences; `elapsedRealtime` can't be set by the user | `failureReasons: [timeSpoofed]` |
 | Auto-time off | `Settings.Global.AUTO_TIME == 0` | `warnings: [autoTimeOff]` — warning only, never fails alone |
 | Mock location | `Location.isMock` (API 31+) / `isFromMockProvider` | `failureReasons: [mockLocation]` |
@@ -25,9 +25,20 @@ an iOS implementation can be added without breaking changes).
 
 ### Why `Date` header instead of a time API?
 
-Any HTTPS response from a domain you control already carries a
-server-generated `Date` header. It's TLS-protected and free — no extra
-time service, no extra request shape. A `HEAD` request is issued.
+Trusted time comes from up to 3 independent sources:
+
+1. **HTTPS `Date` headers** — raced against SNTP; the chain retries once.
+2. **SNTP (UDP 123)** — a different failure domain: a network that
+   blocks the HTTPS endpoints often still allows NTP, and vice versa.
+3. **GNSS satellite clock** — captured alongside the location fix
+   (`GnssMeasurementsEvent`), fully offline; used only when both network
+   sources are dead. Requires real sky visibility — indoors it stays
+   null, which is expected (location would be `inconclusive` anyway).
+
+If all three are unreachable → `timeSourceUnreachable` (log, don't
+block). The local boot-anchor check still runs in every case.
+
+### HTTPS time endpoints
 
 **Default endpoints** (tried in order, first success wins — all return a
 standard `Date` header):
@@ -40,7 +51,9 @@ standard `Date` header):
 
 A region blocking Google typically doesn't block Cloudflare and Apple.
 If your app has its own backend, prepend it to `timeEndpoints` — trusting
-a domain you control is strictly better than a third party.
+a domain you control is strictly better than a third party. SNTP
+servers default to `pool.ntp.org`, `time.cloudflare.com`,
+`time.google.com` (override via `sntpServers`).
 
 ## Status model
 

@@ -87,8 +87,18 @@ class GeoTimeConfig {
     'https://captive.apple.com',
   ];
 
+  /// SNTP servers (UDP 123) tried in parallel with the HTTPS chain —
+  /// a different failure domain, so a network that blocks the HTTPS
+  /// endpoints may still allow NTP.
+  static const defaultSntpServers = [
+    'pool.ntp.org',
+    'time.cloudflare.com',
+    'time.google.com',
+  ];
+
   const GeoTimeConfig({
     this.timeEndpoints = defaultTimeEndpoints,
+    this.sntpServers = defaultSntpServers,
     required this.targetLatitude,
     required this.targetLongitude,
     required this.radiusMeters,
@@ -101,6 +111,10 @@ class GeoTimeConfig {
   /// time — tried in order, first success wins. Prefer putting your own
   /// backend first if you have one; defaults to [defaultTimeEndpoints].
   final List<String> timeEndpoints;
+
+  /// SNTP (NTP over UDP 123) server hostnames, raced against
+  /// [timeEndpoints]; first trusted source to answer wins.
+  final List<String> sntpServers;
 
   /// Center of the allowed area (e.g. the check-in site).
   final double targetLatitude;
@@ -122,6 +136,7 @@ class GeoTimeConfig {
 
   Map<String, Object?> toMap() => {
         'timeEndpoints': timeEndpoints,
+        'sntpServers': sntpServers,
         'targetLatitude': targetLatitude,
         'targetLongitude': targetLongitude,
         'radiusMeters': radiusMeters,

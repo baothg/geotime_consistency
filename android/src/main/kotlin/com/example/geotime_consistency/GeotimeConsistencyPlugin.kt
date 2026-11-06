@@ -52,6 +52,8 @@ class GeotimeConsistencyPlugin :
     private suspend fun runValidation(call: MethodCall): Map<String, Any?> {
         val endpoints = call.argument<List<String>>("timeEndpoints")
             ?: listOf("https://clients3.google.com/generate_204")
+        val sntpServers = call.argument<List<String>>("sntpServers")
+            ?: listOf("pool.ntp.org")
         val targetLat = call.argument<Double>("targetLatitude")
             ?: return errorResult("targetLatitude is required")
         val targetLng = call.argument<Double>("targetLongitude")
@@ -62,8 +64,10 @@ class GeotimeConsistencyPlugin :
         val maxAccuracy = call.argument<Number>("maxAccuracyMeters")?.toDouble() ?: 100.0
         val timeoutMs = call.argument<Number>("networkTimeoutMs")?.toInt() ?: 5_000
 
-        // 1. Network gate — everything else needs it.
-        val time = NetworkTimeChecker.check(appContext, endpoints, timeoutMs, toleranceMs)
+        // 1. Network gate + trusted time (HTTP race SNTP).
+        val time = NetworkTimeChecker.check(
+            appContext, endpoints, sntpServers, timeoutMs, toleranceMs
+        )
         if (!time.networkAvailable) {
             return mapOf(
                 "status" to "noNetwork",
@@ -77,8 +81,20 @@ class GeotimeConsistencyPlugin :
         //    processes; keep off the UI thread).
         val integrity = withContext(Dispatchers.IO) { IntegrityChecker.check(appContext) }
 
-        // 3. Location fix + mock + radius.
+        // 3. Location fix + mock + radius (+ GNSS clock captured along the way).
         val loc = LocationChecker.check(appContext, targetLat, targetLng)
+
+        // 4. GNSS satellite clock — fully offline backstop when every
+        //    network time source failed.
+        var serverTimeMs = time.serverTimeMs
+        var deltaMs = time.deltaMs
+        var clockTampered = time.clockTampered
+        if (serverTimeMs == null && loc.gnssTimeMs != null) {
+            serverTimeMs = loc.gnssTimeMs
+            val gnssDelta = System.currentTimeMillis() - loc.gnssTimeMs
+            deltaMs = gnssDelta
+            if (kotlin.math.abs(gnssDelta) > toleranceMs) clockTampered = true
+        }
 
         val failures = mutableListOf<String>()
         val warnings = mutableListOf<String>()
@@ -89,7 +105,7 @@ class GeotimeConsistencyPlugin :
         if (!integrity.autoTimeEnabled) warnings += "autoTimeOff"
         if (integrity.fakeGpsAppInstalled) warnings += "mockAppInstalled"
 
-        if (time.clockTampered) failures += "timeSpoofed"
+        if (clockTampered) failures += "timeSpoofed"
 
         var status = "pass"
         var errorMessage: String? = null
@@ -119,7 +135,7 @@ class GeotimeConsistencyPlugin :
         }
         if (failures.isNotEmpty()) {
             status = "fail"
-        } else if (status == "pass" && time.serverTimeMs == null) {
+        } else if (status == "pass" && serverTimeMs == null) {
             // Network was validated but no trusted time source answered —
             // not the user's fault; don't block, let the client log/retry.
             status = "timeSourceUnreachable"
@@ -129,9 +145,9 @@ class GeotimeConsistencyPlugin :
             "status" to status,
             "failureReasons" to failures,
             "warnings" to warnings,
-            "serverTimeMs" to time.serverTimeMs,
+            "serverTimeMs" to serverTimeMs,
             "deviceTimeMs" to time.deviceTimeMs,
-            "timeDeltaMs" to time.deltaMs,
+            "timeDeltaMs" to deltaMs,
             "latitude" to loc.latitude,
             "longitude" to loc.longitude,
             "accuracyMeters" to loc.accuracyMeters?.toDouble(),
