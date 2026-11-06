@@ -25,6 +25,7 @@ object NetworkTimeChecker {
     private const val KEY_BOOT_ANCHOR = "boot_anchor_ms"
     // A real reboot resets elapsedRealtime; treat a fresh boot as a new anchor.
     private const val FRESH_BOOT_MS = 5 * 60 * 1000L
+    private const val RETRY_DELAY_MS = 500L
 
     data class Result(
         val networkAvailable: Boolean,
@@ -46,12 +47,20 @@ object NetworkTimeChecker {
             return@withContext Result(false, null, deviceTime, null, false)
         }
 
+        // Try the whole chain twice — a single dropped packet or slow CDN
+        // edge shouldn't mark all sources dead.
         val before = SystemClock.elapsedRealtime()
-        val serverMs = endpoints.firstNotNullOfOrNull { fetchServerTime(it, timeoutMs) }
+        val serverMs = (0..1).firstNotNullOfOrNull { attempt ->
+            if (attempt > 0) kotlinx.coroutines.delay(RETRY_DELAY_MS)
+            endpoints.firstNotNullOfOrNull { fetchServerTime(it, timeoutMs) }
+        }
         val after = SystemClock.elapsedRealtime()
 
+        // Network is validated but every time source failed — report
+        // networkAvailable=true with no server time so the caller can
+        // distinguish this from an actual offline state.
         if (serverMs == null) {
-            return@withContext Result(false, null, deviceTime, null, false)
+            return@withContext Result(true, null, deviceTime, null, false)
         }
 
         // Server time corresponds to the midpoint of the request round-trip.

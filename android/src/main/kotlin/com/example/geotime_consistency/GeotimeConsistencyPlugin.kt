@@ -117,7 +117,13 @@ class GeotimeConsistencyPlugin :
                 errorMessage = loc.errorMessage
             }
         }
-        if (failures.isNotEmpty()) status = "fail"
+        if (failures.isNotEmpty()) {
+            status = "fail"
+        } else if (status == "pass" && time.serverTimeMs == null) {
+            // Network was validated but no trusted time source answered —
+            // not the user's fault; don't block, let the client log/retry.
+            status = "timeSourceUnreachable"
+        }
 
         return mapOf(
             "status" to status,

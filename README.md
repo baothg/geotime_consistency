@@ -49,6 +49,8 @@ pass          → allow the action
 fail          → block; inspect result.failureReasons
 inconclusive  → retry (weak GPS / permission missing / location off)
 noNetwork     → ask the user to connect, then retry
+timeSourceUnreachable → internet OK but every trusted time endpoint
+              failed; other checks still ran. Log it, don't block.
 error         → log result.errorMessage
 ```
 
@@ -133,6 +135,7 @@ rules:
 | `fail` | **Non-fatal** `recordError` | `Exception('geotime_consistency_fail')`, keys below + `failureReasons` joined |
 | `inconclusive` | **Non-fatal** `recordError` only if ≥3 in a row per user | `Exception('geotime_consistency_inconclusive')` + `errorMessage` — sporadic weak GPS is normal, persistent is a device/config problem |
 | `noNetwork` | No | UX retry flow; logging adds nothing |
+| `timeSourceUnreachable` | **Non-fatal** `recordError` | `Exception('geotime_consistency_time_source')` — likely an outage or region block; a spike means add/rotate an endpoint |
 | `error` | **Non-fatal** `recordError` | `Exception('geotime_consistency_error')` + `errorMessage` |
 
 Always attach these custom keys (both `recordError` calls):

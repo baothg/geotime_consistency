@@ -27,7 +27,8 @@ class _MyAppState extends State<MyApp> {
     setState(() => _output = 'Running checks…');
     final result = await GeotimeConsistency.validate(
       const GeoTimeConfig(
-        // timeEndpoints defaults to a Google/Cloudflare/Apple fallback chain.
+        // timeEndpoints defaults to a Google/Cloudflare/Apple fallback
+        // chain; prepend your own backend if you have one.
         targetLatitude: 10.762622, // HCMC
         targetLongitude: 106.660172,
         radiusMeters: 500,

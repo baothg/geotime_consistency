@@ -15,6 +15,12 @@ enum GeoTimeStatus {
   /// the client app decides whether to retry or block.
   noNetwork,
 
+  /// Internet is available (validated) but every trusted time endpoint
+  /// failed to respond. The other checks still ran; this status only
+  /// means the time check could not be performed. Non-blocking: log it
+  /// and/or retry rather than treating it as cheating.
+  timeSourceUnreachable,
+
   /// Unexpected system error (permission denied, Play Services
   /// missing, ...). See [GeoTimeResult.errorMessage].
   error,

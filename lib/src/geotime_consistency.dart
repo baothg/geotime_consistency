@@ -18,6 +18,7 @@ import 'models.dart';
 ///   case GeoTimeStatus.pass: /* allow */ break;
 ///   case GeoTimeStatus.fail: /* block — see result.failureReasons */ break;
 ///   case GeoTimeStatus.noNetwork: /* ask user to connect & retry */ break;
+///   case GeoTimeStatus.timeSourceUnreachable: /* log; don't block */ break;
 ///   case GeoTimeStatus.inconclusive: /* retry, weak GPS */ break;
 ///   case GeoTimeStatus.error: /* log result.errorMessage */ break;
 /// }
