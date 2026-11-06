@@ -13,7 +13,7 @@ an iOS implementation can be added without breaking changes).
 |---|---|---|
 | Network | `NET_CAPABILITY_VALIDATED` + a real request to your trusted endpoint | `noNetwork` gate — everything else requires it |
 | Root | `su` binaries, `test-keys`, Magisk/SuperSU packages, `which su` | `failureReasons: [rooted]` |
-| Server time | Layered trusted sources: **(HTTPS `Date` race SNTP/UDP-123) → GNSS satellite clock** — different failure domains; first to answer wins | `failureReasons: [timeSpoofed]` when \|device − source\| > tolerance |
+| Server time | Layered trusted sources by trust: **HTTPS `Date` → SNTP/UDP-123 → GNSS satellite clock** | `failureReasons: [timeSpoofed]` when \|device − source\| > tolerance |
 | Clock changed mid-session | Boot anchor `wallClock − elapsedRealtime` persisted in SharedPreferences; `elapsedRealtime` can't be set by the user | `failureReasons: [timeSpoofed]` |
 | Auto-time off | `Settings.Global.AUTO_TIME == 0` | `warnings: [autoTimeOff]` — warning only, never fails alone |
 | Mock location | `Location.isMock` (API 31+) / `isFromMockProvider` | `failureReasons: [mockLocation]` |
@@ -27,9 +27,13 @@ an iOS implementation can be added without breaking changes).
 
 Trusted time comes from up to 3 independent sources:
 
-1. **HTTPS `Date` headers** — raced against SNTP; the chain retries once.
-2. **SNTP (UDP 123)** — a different failure domain: a network that
-   blocks the HTTPS endpoints often still allows NTP, and vice versa.
+1. **HTTPS `Date` headers** — tried first, retried once. TLS cannot be
+   forged on-path, so it is preferred over SNTP whenever it can answer.
+2. **SNTP (UDP 123)** — backstop only: a different failure domain (a
+   network that blocks the HTTPS endpoints often still allows NTP), but
+   unauthenticated UDP is forgeable — responses are field-validated
+   (mode/stratum/originate timestamp) and it is only consulted when
+   every HTTPS endpoint is dead.
 3. **GNSS satellite clock** — captured alongside the location fix
    (`GnssMeasurementsEvent`), fully offline; used only when both network
    sources are dead. Requires real sky visibility — indoors it stays

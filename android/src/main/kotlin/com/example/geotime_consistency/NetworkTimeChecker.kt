@@ -5,11 +5,7 @@ import android.net.ConnectivityManager
 import android.net.NetworkCapabilities
 import android.os.SystemClock
 import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.channels.Channel
-import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.delay
-import kotlinx.coroutines.joinAll
-import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.net.DatagramPacket
 import java.net.DatagramSocket
@@ -21,13 +17,16 @@ import java.util.Locale
 import java.util.TimeZone
 
 /**
- * Trusted-time check. Never trusts the device clock. Sources, in order
- * of preference by expected latency:
- *  1. race: HTTPS `Date` headers (trusted endpoints) vs SNTP (UDP 123)
- *     — different failure domains; first to answer wins
- *  2. GNSS satellite clock (handled by the caller, piggybacked on the
+ * Trusted-time check. Never trusts the device clock. Sources, ordered
+ * by trust rather than speed:
+ *  1. HTTPS `Date` headers (trusted endpoints) — TLS cannot be forged
+ *     on-path
+ *  2. SNTP (UDP 123) — backstop for networks that block the endpoints;
+ *     forgeable, so only used when HTTPS is dead. Responses are
+ *     field-validated (mode/stratum/originate timestamp)
+ *  3. GNSS satellite clock (handled by the caller, piggybacked on the
  *     location fix) — fully offline backstop
- *  3. a persisted "boot anchor" (wallTime - elapsedRealtime) detects the
+ *  4. a persisted "boot anchor" (wallTime - elapsedRealtime) detects the
  *     clock being changed mid-session even when no source answers
  */
 object NetworkTimeChecker {
@@ -60,7 +59,7 @@ object NetworkTimeChecker {
             return@withContext Result(false, null, deviceTime, null, false)
         }
 
-        val serverMs = raceToFirstTime(endpoints, sntpServers, timeoutMs)
+        val serverMs = fetchTrustedTime(endpoints, sntpServers, timeoutMs)
 
         // Boot anchor is the local backstop — it must run even when every
         // remote source is dead.
@@ -81,31 +80,19 @@ object NetworkTimeChecker {
     }
 
     /**
-     * Races the HTTPS chain against the SNTP chain. The first source to
-     * return a non-null time wins; each chain retries once. Returns null
-     * only when every source fails.
+     * Trusted sources by trust, not speed: HTTPS (TLS — an on-path
+     * attacker cannot forge it) first; SNTP only when every HTTPS
+     * endpoint is dead. Racing them would let a faster forged UDP reply
+     * beat the trustworthy TLS answer.
      */
-    private suspend fun raceToFirstTime(
+    private suspend fun fetchTrustedTime(
         endpoints: List<String>,
         sntpServers: List<String>,
         timeoutMs: Int,
-    ): Long? = coroutineScope {
-        val winners = Channel<Long>(capacity = 2)
-        val jobs = listOf(
-            launch {
-                retryOnce { endpoints.firstNotNullOfOrNull { fetchHttpTime(it, timeoutMs) } }
-                    ?.let { winners.send(it) }
-            },
-            launch {
-                retryOnce { sntpServers.firstNotNullOfOrNull { fetchSntpTime(it, timeoutMs) } }
-                    ?.let { winners.send(it) }
-            },
-        )
-        launch {
-            jobs.joinAll()
-            winners.close()
-        }
-        winners.receiveCatching().getOrNull()
+    ): Long? {
+        retryOnce { endpoints.firstNotNullOfOrNull { fetchHttpTime(it, timeoutMs) } }
+            ?.let { return it }
+        return retryOnce { sntpServers.firstNotNullOfOrNull { fetchSntpTime(it, timeoutMs) } }
     }
 
     /** Runs [block] twice with a short pause; returns its non-null result. */
@@ -167,6 +154,15 @@ object NetworkTimeChecker {
                 val response = ByteArray(48)
                 socket.receive(DatagramPacket(response, response.size))
                 val t4 = System.currentTimeMillis()
+
+                // Forgery guards: must be a server-mode reply (mode 4)
+                // from a real stratum, echoing our originate timestamp.
+                val mode = response[0].toInt() and 0x7
+                val stratum = response[1].toInt() and 0xFF
+                val originate = readTimestamp(response, 24)
+                if (mode != 4 || stratum !in 1..15 ||
+                    kotlin.math.abs(originate - t1) > timeoutMs
+                ) return null
 
                 val t2 = readTimestamp(response, 32) // server receive
                 val t3 = readTimestamp(response, 40) // server transmit
