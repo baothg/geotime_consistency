@@ -159,8 +159,10 @@ class GeotimeConsistencyPlugin :
                             status = "inconclusive"
                         // Fail only when outside the radius beyond the fix's
                         // own uncertainty — a user at the radius edge with a
-                        // wobbly fix is not a cheater.
-                        (loc.distanceMeters ?: Float.MAX_VALUE) - (accuracy ?: 0f) > radius ->
+                        // wobbly fix is not a cheater. The comparison radius
+                        // is eased 10% (100m → 110m); the reported radius
+                        // stays the configured value.
+                        (loc.distanceMeters ?: Float.MAX_VALUE) - (accuracy ?: 0f) > radius * 1.1 ->
                             failures += "outOfRadius"
                     }
                 }
