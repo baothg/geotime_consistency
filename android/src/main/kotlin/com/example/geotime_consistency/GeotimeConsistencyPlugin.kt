@@ -68,9 +68,13 @@ class GeotimeConsistencyPlugin :
 
     private suspend fun runValidation(call: MethodCall): Map<String, Any?> {
         val endpoints = call.argument<List<String>>("timeEndpoints")
-            ?: listOf("https://clients3.google.com/generate_204")
+            ?: listOf(
+                "https://clients3.google.com/generate_204",
+                "https://1.1.1.1",
+                "https://captive.apple.com",
+            )
         val sntpServers = call.argument<List<String>>("sntpServers")
-            ?: listOf("pool.ntp.org")
+            ?: listOf("pool.ntp.org", "time.cloudflare.com", "time.google.com")
         val targetLat = call.argument<Double>("targetLatitude")
             ?: return errorResult("targetLatitude is required")
         val targetLng = call.argument<Double>("targetLongitude")
@@ -118,6 +122,7 @@ class GeotimeConsistencyPlugin :
         var serverTimeMs = time.serverTimeMs
         var deltaMs = time.deltaMs
         var clockTampered = time.clockTampered
+        var timeSource = time.sourceName
         // SNTP is forgeable; when the satellite clock is also available,
         // cross-check the SNTP answer against it — covers the post-reboot
         // window where no trusted anchor exists yet.
@@ -128,6 +133,7 @@ class GeotimeConsistencyPlugin :
         }
         if (serverTimeMs == null && loc.gnssTimeMs != null) {
             serverTimeMs = loc.gnssTimeMs
+            timeSource = "gnss"
             val gnssDelta = System.currentTimeMillis() - loc.gnssTimeMs
             deltaMs = gnssDelta
             if (kotlin.math.abs(gnssDelta) > toleranceMs) clockTampered = true
@@ -189,6 +195,11 @@ class GeotimeConsistencyPlugin :
             "serverTimeMs" to serverTimeMs,
             "deviceTimeMs" to time.deviceTimeMs,
             "timeDeltaMs" to deltaMs,
+            // Diagnostics for Crashlytics-style logging: which trusted
+            // source answered, and why each attempt failed.
+            "timeSource" to timeSource,
+            "timeAttempts" to time.attempts,
+            "gnssTimeMs" to loc.gnssTimeMs,
             "latitude" to loc.latitude,
             "longitude" to loc.longitude,
             "accuracyMeters" to loc.accuracyMeters?.toDouble(),

@@ -113,8 +113,9 @@ class GeoTimeConfig {
   /// backend first if you have one; defaults to [defaultTimeEndpoints].
   final List<String> timeEndpoints;
 
-  /// SNTP (NTP over UDP 123) server hostnames, raced against
-  /// [timeEndpoints]; first trusted source to answer wins.
+  /// SNTP (NTP over UDP 123) server hostnames, used only when every
+  /// HTTPS endpoint fails — HTTPS always wins regardless of which
+  /// answers first.
   final List<String> sntpServers;
 
   /// Center of the allowed area (e.g. the check-in site).
@@ -156,6 +157,9 @@ class GeoTimeResult {
     this.serverTime,
     this.deviceTime,
     this.timeDeltaMs,
+    this.timeSource,
+    this.timeAttempts = const [],
+    this.gnssTime,
     this.latitude,
     this.longitude,
     this.accuracyMeters,
@@ -180,6 +184,10 @@ class GeoTimeResult {
         serverTime: _millisToDate(m['serverTimeMs']),
         deviceTime: _millisToDate(m['deviceTimeMs']),
         timeDeltaMs: (m['timeDeltaMs'] as num?)?.toInt(),
+        timeSource: m['timeSource'] as String?,
+        timeAttempts: (m['timeAttempts'] as List?)?.whereType<String>().toList() ??
+            const [],
+        gnssTime: _millisToDate(m['gnssTimeMs']),
         latitude: (m['latitude'] as num?)?.toDouble(),
         longitude: (m['longitude'] as num?)?.toDouble(),
         accuracyMeters: (m['accuracyMeters'] as num?)?.toDouble(),
@@ -207,6 +215,21 @@ class GeoTimeResult {
   /// Signed difference `deviceTime - serverTime`, latency-corrected.
   final int? timeDeltaMs;
 
+  /// Which trusted source produced [serverTime]: `"https"`, `"sntp"`,
+  /// `"gnss"`, `"anchor"` (trusted boot anchor estimate), or null when
+  /// no source answered. Useful as a Crashlytics key.
+  final String? timeSource;
+
+  /// Per-attempt diagnostics, e.g.
+  /// `"https:1.1.1.1:SocketTimeoutException"` or
+  /// `"sntp:pool.ntp.org:invalidReply"`. Empty when the first tried
+  /// source succeeded. Log these on `timeSourceUnreachable`.
+  final List<String> timeAttempts;
+
+  /// UTC time from the GNSS satellite clock when a fix was obtained —
+  /// even when it was not the source used. Null indoors/without fix.
+  final DateTime? gnssTime;
+
   /// Validated coordinates of the fix used for the radius check.
   /// Present whenever a fix was obtained (even on `inconclusive`) — the
   /// client may use or cross-check them. Absent when no fix exists.
@@ -227,6 +250,7 @@ class GeoTimeResult {
   @override
   String toString() =>
       'GeoTimeResult(status: $status, failures: $failureReasons, warnings: $warnings, '
-      'deltaMs: $timeDeltaMs, distance: $distanceMeters, accuracy: $accuracyMeters, '
+      'deltaMs: $timeDeltaMs, timeSource: $timeSource, '
+      'distance: $distanceMeters, accuracy: $accuracyMeters, '
       'error: $errorMessage)';
 }

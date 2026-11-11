@@ -51,11 +51,16 @@ object NetworkTimeChecker {
     data class Result(
         val networkAvailable: Boolean,
         val serverTimeMs: Long?,
-        /** True when [serverTimeMs] came from HTTPS; false = SNTP. */
+        /** True when [serverTimeMs] came from HTTPS; false = weaker source. */
         val viaHttps: Boolean,
         val deviceTimeMs: Long?,
         val deltaMs: Long?,
         val clockTampered: Boolean,
+        /** Which trusted source produced [serverTimeMs]:
+         *  "https", "sntp", "anchor", or null when nothing answered. */
+        val sourceName: String?,
+        /** Per-attempt diagnostics, e.g. "https:1.1.1.1:SocketTimeoutException". */
+        val attempts: List<String>,
     )
 
     suspend fun check(
@@ -68,7 +73,7 @@ object NetworkTimeChecker {
         val deviceTime = System.currentTimeMillis()
 
         if (!hasValidatedNetwork(context)) {
-            return@withContext Result(false, null, false, deviceTime, null, false)
+            return@withContext Result(false, null, false, deviceTime, null, false, null, emptyList())
         }
 
         // Fetch in a separate async: blocked sockets/connections ignore
@@ -76,9 +81,10 @@ object NetworkTimeChecker {
         // itself would still wait for them. Awaiting a separate deferred
         // lets the deadline return immediately.
         val closers = CopyOnWriteArrayList<() -> Unit>()
+        val attempts = CopyOnWriteArrayList<String>()
         val expired = AtomicBoolean(false)
         val fetch = CoroutineScope(coroutineContext).async(Dispatchers.IO) {
-            fetchTrustedTime(endpoints, sntpServers, timeoutMs, closers, expired)
+            fetchTrustedTime(endpoints, sntpServers, timeoutMs, closers, attempts, expired)
         }
         val source = withTimeoutOrNull(TOTAL_BUDGET_MS) { fetch.await() }
         if (source == null) {
@@ -92,14 +98,34 @@ object NetworkTimeChecker {
 
         // The trusted anchor is the local backstop — it must run even
         // when every remote source is dead.
-        val anchorTampered = checkTrustedAnchor(context, toleranceMs)
+        val anchor = validAnchor(context)
 
-        // Network is validated but every time source failed — report
-        // networkAvailable=true with no server time so the caller can
-        // distinguish this from an actual offline state (and try GNSS).
         if (source == null) {
-            return@withContext Result(true, null, false, deviceTime, null, anchorTampered)
+            if (anchor != null) {
+                // A boot-count-valid anchor is itself a trusted time
+                // source: estimated now = anchor + elapsedRealtime. The
+                // honest user gets a real verdict instead of
+                // "unreachable"; a moved clock still flags tampered.
+                val elapsed = SystemClock.elapsedRealtime()
+                val now = System.currentTimeMillis()
+                val estimated = anchor + elapsed
+                val delta = now - estimated
+                return@withContext Result(
+                    true, estimated, false, now, delta,
+                    kotlin.math.abs(delta) > toleranceMs,
+                    "anchor", attempts,
+                )
+            }
+            // Nothing trusted answered and no usable anchor — report
+            // networkAvailable=true with no server time so the caller
+            // can distinguish this from offline (and try GNSS).
+            return@withContext Result(true, null, false, deviceTime, null, false, null, attempts)
         }
+
+        val anchorTampered = anchor?.let {
+            val wallAnchor = System.currentTimeMillis() - SystemClock.elapsedRealtime()
+            kotlin.math.abs(wallAnchor - it) > toleranceMs
+        } ?: false
 
         val now = System.currentTimeMillis()
         val delta = now - source.ms
@@ -116,7 +142,7 @@ object NetworkTimeChecker {
             recordTrustedTime(context, source.ms)
         }
 
-        Result(true, source.ms, source.viaHttps, now, delta, clockTampered)
+        Result(true, source.ms, source.viaHttps, now, delta, clockTampered, source.name, attempts)
     }
 
     /**
@@ -133,31 +159,42 @@ object NetworkTimeChecker {
             .apply()
     }
 
-    private data class SourcedTime(val ms: Long, val viaHttps: Boolean)
+    private data class SourcedTime(val ms: Long, val viaHttps: Boolean, val name: String)
 
     /**
-     * Trusted sources by trust, not speed: HTTPS (TLS — an on-path
-     * attacker cannot forge it) first; SNTP only when every HTTPS
-     * endpoint is dead. Racing them would let a faster forged UDP reply
-     * beat the trustworthy TLS answer.
+     * HTTPS and SNTP are ATTEMPTED in parallel — they fail in different
+     * domains, so a blackholed TLS chain must not starve NTP inside the
+     * shared budget. Trust order is enforced at selection, not speed:
+     * an HTTPS answer always wins over SNTP regardless of which arrived
+     * first, so a fast forged UDP reply can never beat the TLS answer.
      */
     private suspend fun fetchTrustedTime(
         endpoints: List<String>,
         sntpServers: List<String>,
         timeoutMs: Int,
         closers: MutableList<() -> Unit>,
+        attempts: MutableList<String>,
         expired: AtomicBoolean,
     ): SourcedTime? {
-        retryOnce(expired) {
+        // Detached scope: if HTTPS wins we return without waiting for a
+        // stranded SNTP receive — it dies on its own soTimeout.
+        val sntpDeferred = CoroutineScope(Dispatchers.IO).async {
+            retryOnce(expired) {
+                sntpServers.firstNotNullOfOrNull {
+                    if (expired.get()) null else fetchSntpTime(it, timeoutMs, closers, attempts)
+                }
+            }
+        }
+        val http = retryOnce(expired) {
             endpoints.firstNotNullOfOrNull {
-                if (expired.get()) null else fetchHttpTime(it, timeoutMs, closers)
+                if (expired.get()) null else fetchHttpTime(it, timeoutMs, closers, attempts)
             }
-        }?.let { return SourcedTime(it, true) }
-        return retryOnce(expired) {
-            sntpServers.firstNotNullOfOrNull {
-                if (expired.get()) null else fetchSntpTime(it, timeoutMs, closers)
-            }
-        }?.let { SourcedTime(it, false) }
+        }
+        if (http != null) {
+            sntpDeferred.cancel()
+            return SourcedTime(http, true, "https")
+        }
+        return sntpDeferred.await()?.let { SourcedTime(it, false, "sntp") }
     }
 
     /** Runs [block] twice with a short pause; stops early once the
@@ -178,7 +215,12 @@ object NetworkTimeChecker {
     }
 
     /** Server-corrected current time via the `Date` header, RTT/2 compensated. */
-    private fun fetchHttpTime(endpoint: String, timeoutMs: Int, closers: MutableList<() -> Unit>): Long? {
+    private fun fetchHttpTime(
+        endpoint: String,
+        timeoutMs: Int,
+        closers: MutableList<() -> Unit>,
+        attempts: MutableList<String>,
+    ): Long? {
         var conn: HttpURLConnection? = null
         val closer: () -> Unit = { conn?.disconnect() }
         val perRequest = minOf(timeoutMs, PER_REQUEST_TIMEOUT_MS)
@@ -196,7 +238,9 @@ object NetworkTimeChecker {
             val after = SystemClock.elapsedRealtime()
             val serverMs = httpDateFormat().parse(dateHeader)?.time ?: return null
             serverMs + (after - before) / 2
-        } catch (_: Exception) {
+        } catch (e: Exception) {
+            attempts += "https:${runCatching { URL(endpoint).host }.getOrDefault(endpoint)}" +
+                ":${e.javaClass.simpleName}"
             null
         } finally {
             closers -= closer
@@ -209,7 +253,12 @@ object NetworkTimeChecker {
      * offset ((t2−t1)+(t3−t4))/2, so latency asymmetry is compensated by
      * the protocol itself rather than a midpoint guess.
      */
-    private fun fetchSntpTime(server: String, timeoutMs: Int, closers: MutableList<() -> Unit>): Long? {
+    private fun fetchSntpTime(
+        server: String,
+        timeoutMs: Int,
+        closers: MutableList<() -> Unit>,
+        attempts: MutableList<String>,
+    ): Long? {
         var socket: DatagramSocket? = null
         val closer: () -> Unit = { socket?.close() }
         return try {
@@ -244,13 +293,17 @@ object NetworkTimeChecker {
             val originate = readTimestamp(response, 24)
             if (leap == 3 || mode != 4 || stratum !in 1..15 ||
                 kotlin.math.abs(originate - t1) > 1_000
-            ) return null
+            ) {
+                attempts += "sntp:$server:invalidReply"
+                return null
+            }
 
             val t2 = readTimestamp(response, 32) // server receive
             val t3 = readTimestamp(response, 40) // server transmit
             val offset = ((t2 - t1) + (t3 - t4)) / 2
             t4 + offset
-        } catch (_: Exception) {
+        } catch (e: Exception) {
+            attempts += "sntp:$server:${e.javaClass.simpleName}"
             null
         } finally {
             closers -= closer
@@ -280,20 +333,6 @@ object NetworkTimeChecker {
         }
 
     /**
-     * Trusted boot anchor = the wall-clock boot instant as certified by a
-     * verified time source (recordTrustedTime). The CURRENT wall clock's
-     * boot instant is nowMs - elapsedRealtime; if it disagrees with the
-     * trusted anchor beyond tolerance, the clock was moved.
-     *
-     * Deliberately never written from an unverified clock — a spoofed
-     * first run cannot poison the anchor. Skip detection while uptime is
-     * low: a real reboot legitimately moves the wall anchor.
-     *
-     * shortcut: a reboot inside FRESH_BOOT_MS still creates a blind
-     * window before the next trusted validation. Upgrade: server-side
-     * anchoring.
-     */
-    /**
      * Android's own reboot counter. -1 when unavailable.
      */
     private fun bootCount(context: Context): Int {
@@ -310,40 +349,33 @@ object NetworkTimeChecker {
 
     /**
      * Trusted boot anchor = the wall-clock boot instant as certified by a
-     * verified time source (recordTrustedTime). The CURRENT wall clock's
-     * boot instant is nowMs - elapsedRealtime; if it disagrees with the
-     * trusted anchor beyond tolerance, the clock was moved.
+     * verified time source (recordTrustedTime), or null when the stored
+     * anchor cannot be used: none saved, uptime still low (a reboot
+     * legitimately moves the wall anchor), or BOOT_COUNT shows a reboot
+     * happened since it was stored. A missing boot count means the
+     * anchor predates boot tracking or the device can't report it —
+     * treated as invalid rather than risking a stale-anchor lockout.
      *
      * Deliberately never written from an unverified clock — a spoofed
-     * first run cannot poison the anchor. Detection is skipped while
-     * uptime is low or when BOOT_COUNT shows a reboot happened since the
-     * anchor was stored: a reboot legitimately moves the wall anchor and
-     * must not flag honest users.
+     * first run cannot poison the anchor.
      *
      * shortcut: a reboot inside FRESH_BOOT_MS still creates a blind
      * window before the next trusted validation. Upgrade: server-side
      * anchoring.
      */
-    private fun checkTrustedAnchor(context: Context, toleranceMs: Long): Boolean {
-        if (SystemClock.elapsedRealtime() < FRESH_BOOT_MS) return false
+    private fun validAnchor(context: Context): Long? {
+        if (SystemClock.elapsedRealtime() < FRESH_BOOT_MS) return null
         val prefs = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
         val trusted = prefs.getLong(KEY_TRUSTED_ANCHOR, Long.MIN_VALUE)
-        if (trusted == Long.MIN_VALUE) return false
+        if (trusted == Long.MIN_VALUE) return null
 
-        // No stored boot count = anchor predates boot tracking or the
-        // device can't report it — treat as invalid rather than risk a
-        // stale-anchor lockout after a reboot.
         val savedBootCount = prefs.getInt(KEY_BOOT_COUNT, -1)
         val currentBootCount = bootCount(context)
         if (savedBootCount == -1 ||
             (currentBootCount != -1 && savedBootCount != currentBootCount)
         ) {
-            return false
+            return null
         }
-
-        // Wall anchor sampled here — the two clocks must be read together
-        // or the check's own duration leaks into the anchor.
-        val wallAnchor = System.currentTimeMillis() - SystemClock.elapsedRealtime()
-        return kotlin.math.abs(wallAnchor - trusted) > toleranceMs
+        return trusted
     }
 }

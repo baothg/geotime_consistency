@@ -13,7 +13,7 @@ an iOS implementation can be added without breaking changes).
 |---|---|---|
 | Network | `NET_CAPABILITY_VALIDATED` + a real request to your trusted endpoint | `noNetwork` gate — everything else requires it |
 | Root | `su` binaries, `test-keys`, Magisk/SuperSU packages, `which su` | `failureReasons: [rooted]` |
-| Server time | Layered trusted sources by trust: **HTTPS `Date` → SNTP/UDP-123 → GNSS satellite clock** | `failureReasons: [timeSpoofed]` when \|device − source\| > tolerance |
+| Server time | Layered trusted sources by trust: **HTTPS `Date` → SNTP/UDP-123 → GNSS satellite clock → trusted boot anchor** | `failureReasons: [timeSpoofed]` when \|device − source\| > tolerance |
 | Clock changed mid-session | Boot anchor `wallClock − elapsedRealtime` persisted in SharedPreferences; `elapsedRealtime` can't be set by the user | `failureReasons: [timeSpoofed]` |
 | Auto-time off | `Settings.Global.AUTO_TIME == 0` | `warnings: [autoTimeOff]` — warning only, never fails alone |
 | Mock location | `Location.isMock` (API 31+) / `isFromMockProvider` | `failureReasons: [mockLocation]` |
@@ -27,20 +27,26 @@ an iOS implementation can be added without breaking changes).
 
 Trusted time comes from up to 3 independent sources:
 
-1. **HTTPS `Date` headers** — tried first, retried once. TLS cannot be
-   forged on-path, so it is preferred over SNTP whenever it can answer.
-2. **SNTP (UDP 123)** — backstop only: a different failure domain (a
-   network that blocks the HTTPS endpoints often still allows NTP), but
-   unauthenticated UDP is forgeable — responses are field-validated
-   (mode/stratum/originate timestamp) and it is only consulted when
-   every HTTPS endpoint is dead.
+1. **HTTPS `Date` headers** — retried once. TLS cannot be forged
+   on-path, so an HTTPS answer always wins regardless of arrival order.
+2. **SNTP (UDP 123)** — attempted in parallel with HTTPS (different
+   failure domain: a network blackholing TLS often still allows NTP) but
+   only *trusted* when every HTTPS endpoint is dead. Unauthenticated UDP
+   is forgeable — responses are field-validated (mode/stratum/originate
+   timestamp) and corroborated against the boot anchor / GNSS clock.
 3. **GNSS satellite clock** — captured alongside the location fix
    (`GnssMeasurementsEvent`), fully offline; used only when both network
    sources are dead. Requires real sky visibility — indoors it stays
    null, which is expected (location would be `inconclusive` anyway).
+4. **Trusted boot anchor** — when every remote source is dead but a
+   boot-count-valid anchor exists, trusted time is *estimated* as
+   `anchor + elapsedRealtime` (`timeSource: "anchor"`). An honest user
+   still gets a real verdict instead of `timeSourceUnreachable`; a moved
+   clock still flags `timeSpoofed`.
 
-If all three are unreachable → `timeSourceUnreachable` (log, don't
-block). The local boot-anchor check still runs in every case.
+If none of the four can answer → `timeSourceUnreachable` (log, don't
+block). That now means: no trusted source AND no usable anchor — i.e.
+first session on this boot, or BOOT_COUNT untrackable.
 
 Time-source fetching has a 12s overall budget; blocked sockets are
 force-closed on expiry (per-request timeouts are capped at 3s). A
@@ -48,12 +54,12 @@ re-entrancy guard rejects a second `validate()` while one is running.
 
 ### Trusted boot anchor
 
-The persisted boot anchor is written **only from verified sources**
-(HTTPS/SNTP/GNSS) and only when the check itself is untampered —
+The persisted boot anchor is written **only by HTTPS and GNSS** —
 `anchor = trustedTime − elapsedRealtime`, stored alongside Android's
 `BOOT_COUNT`. An unverified wall clock can never poison it, a forged
 SNTP answer can't re-seed it, and a reboot (BOOT_COUNT changed) voids
-the old anchor instead of false-flagging the user.
+the old anchor instead of false-flagging the user. When remote sources
+are unreachable the anchor doubles as an estimated time source.
 
 ### HTTPS time endpoints
 
@@ -174,9 +180,18 @@ Always attach these custom keys (both `recordError` calls):
 FirebaseCrashlytics.instance.setCustomKey('gtc_reasons', result.failureReasons.join(','));
 FirebaseCrashlytics.instance.setCustomKey('gtc_warnings', result.warnings.join(','));
 FirebaseCrashlytics.instance.setCustomKey('gtc_time_delta_ms', result.timeDeltaMs ?? -1);
+FirebaseCrashlytics.instance.setCustomKey('gtc_time_source', result.timeSource ?? 'none');
+FirebaseCrashlytics.instance.setCustomKey('gtc_time_attempts', result.timeAttempts.join(';'));
+FirebaseCrashlytics.instance.setCustomKey('gtc_gnss_available', result.gnssTime != null);
 FirebaseCrashlytics.instance.setCustomKey('gtc_distance_m', result.distanceMeters ?? -1);
 FirebaseCrashlytics.instance.setCustomKey('gtc_accuracy_m', result.accuracyMeters ?? -1);
 ```
+
+Reading `gtc_time_attempts` on `timeSourceUnreachable` tells you exactly
+which layer failed, e.g. `https:1.1.1.1:SSLHandshakeException;
+sntp:pool.ntp.org:SocketTimeoutException` = TLS interception + UDP
+blocked (typical captive/enterprise network), while
+`UnknownHostException` on everything = broken DNS.
 
 **Privacy rules — do NOT log:**
 
