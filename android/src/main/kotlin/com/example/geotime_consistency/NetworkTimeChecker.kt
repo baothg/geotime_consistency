@@ -224,6 +224,7 @@ object NetworkTimeChecker {
         var conn: HttpURLConnection? = null
         val closer: () -> Unit = { conn?.disconnect() }
         val perRequest = minOf(timeoutMs, PER_REQUEST_TIMEOUT_MS)
+        val host = runCatching { URL(endpoint).host }.getOrDefault(endpoint)
         return try {
             conn = (URL(endpoint).openConnection() as HttpURLConnection).apply {
                 requestMethod = "HEAD"
@@ -234,13 +235,20 @@ object NetworkTimeChecker {
             closers += closer
             val before = SystemClock.elapsedRealtime()
             conn.connect()
-            val dateHeader = conn.getHeaderField("Date") ?: return null
+            val dateHeader = conn.getHeaderField("Date")
+            if (dateHeader == null) {
+                attempts += "https:$host:noDateHeader"
+                return null
+            }
             val after = SystemClock.elapsedRealtime()
-            val serverMs = httpDateFormat().parse(dateHeader)?.time ?: return null
+            val serverMs = httpDateFormat().parse(dateHeader)?.time
+            if (serverMs == null) {
+                attempts += "https:$host:badDateHeader"
+                return null
+            }
             serverMs + (after - before) / 2
         } catch (e: Exception) {
-            attempts += "https:${runCatching { URL(endpoint).host }.getOrDefault(endpoint)}" +
-                ":${e.javaClass.simpleName}"
+            attempts += "https:$host:${e.javaClass.simpleName}"
             null
         } finally {
             closers -= closer
