@@ -41,12 +41,20 @@ object NetworkTimeChecker {
     private const val PREFS = "geotime_consistency"
     private const val KEY_TRUSTED_ANCHOR = "trusted_boot_anchor_ms"
     private const val KEY_BOOT_COUNT = "boot_count"
+    private const val KEY_ANCHOR_ELAPSED = "anchor_recorded_elapsed_ms"
     // A real reboot resets elapsedRealtime; treat a fresh boot as a new anchor.
     private const val FRESH_BOOT_MS = 5 * 60 * 1000L
     private const val RETRY_DELAY_MS = 500L
     private const val PER_REQUEST_TIMEOUT_MS = 3_000
     private const val TOTAL_BUDGET_MS = 12_000L
+    // HTTPS gets its own share of the budget: a stalled TLS chain must
+    // not run past the deadline and discard a finished SNTP answer.
+    private const val HTTPS_BUDGET_MS = 8_000L
     private const val NTP_UNIX_EPOCH_DIFF = 2_208_988_800L
+    // Anchors older than this are ignored: elapsedRealtime drifts a few
+    // seconds per day, so a very old estimate can false-flag honest
+    // clocks. Any HTTPS/GNSS success refreshes it.
+    private const val ANCHOR_MAX_AGE_MS = 7L * 24 * 60 * 60 * 1000
 
     data class Result(
         val networkAvailable: Boolean,
@@ -151,11 +159,12 @@ object NetworkTimeChecker {
      * (GNSS callers use this from the plugin).
      */
     fun recordTrustedTime(context: Context, trustedMs: Long) {
-        val anchor = trustedMs - SystemClock.elapsedRealtime()
+        val elapsed = SystemClock.elapsedRealtime()
         context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
             .edit()
-            .putLong(KEY_TRUSTED_ANCHOR, anchor)
+            .putLong(KEY_TRUSTED_ANCHOR, trustedMs - elapsed)
             .putInt(KEY_BOOT_COUNT, bootCount(context))
+            .putLong(KEY_ANCHOR_ELAPSED, elapsed)
             .apply()
     }
 
@@ -176,34 +185,46 @@ object NetworkTimeChecker {
         attempts: MutableList<String>,
         expired: AtomicBoolean,
     ): SourcedTime? {
-        // Detached scope: if HTTPS wins we return without waiting for a
-        // stranded SNTP receive — it dies on its own soTimeout.
+        // Both chains on detached scopes: the loser never blocks the
+        // winner, and a stalled chain dies on its own socket timeouts.
+        // `decided` stops the SNTP chain retrying and recording noisy
+        // attempts once a winner exists.
+        val decided = AtomicBoolean(false)
         val sntpDeferred = CoroutineScope(Dispatchers.IO).async {
-            retryOnce(expired) {
+            retryOnce({ expired.get() || decided.get() }) {
                 sntpServers.firstNotNullOfOrNull {
-                    if (expired.get()) null else fetchSntpTime(it, timeoutMs, closers, attempts)
+                    if (expired.get() || decided.get()) null
+                    else fetchSntpTime(it, timeoutMs, closers, attempts, decided)
                 }
             }
         }
-        val http = retryOnce(expired) {
-            endpoints.firstNotNullOfOrNull {
-                if (expired.get()) null else fetchHttpTime(it, timeoutMs, closers, attempts)
+        val httpDeferred = CoroutineScope(Dispatchers.IO).async {
+            retryOnce({ expired.get() }) {
+                endpoints.firstNotNullOfOrNull {
+                    if (expired.get()) null else fetchHttpTime(it, timeoutMs, closers, attempts)
+                }
             }
         }
+        // HTTPS has its own deadline inside the total budget — without
+        // it a stalled TLS chain eats all 12s and a finished SNTP
+        // answer is thrown away.
+        val http = withTimeoutOrNull(HTTPS_BUDGET_MS) { httpDeferred.await() }
         if (http != null) {
+            decided.set(true)
             sntpDeferred.cancel()
             return SourcedTime(http, true, "https")
         }
+        httpDeferred.cancel()
         return sntpDeferred.await()?.let { SourcedTime(it, false, "sntp") }
     }
 
-    /** Runs [block] twice with a short pause; stops early once the
-     *  overall budget expired so no fresh request is opened. */
-    private suspend fun retryOnce(expired: AtomicBoolean, block: () -> Long?): Long? {
-        if (expired.get()) return null
+    /** Runs [block] twice with a short pause; stops early once [stop]
+     *  is true so no fresh request is opened. */
+    private suspend fun retryOnce(stop: () -> Boolean, block: () -> Long?): Long? {
+        if (stop()) return null
         block()?.let { return it }
         delay(RETRY_DELAY_MS)
-        if (expired.get()) return null
+        if (stop()) return null
         return block()
     }
 
@@ -266,6 +287,7 @@ object NetworkTimeChecker {
         timeoutMs: Int,
         closers: MutableList<() -> Unit>,
         attempts: MutableList<String>,
+        superseded: AtomicBoolean,
     ): Long? {
         var socket: DatagramSocket? = null
         val closer: () -> Unit = { socket?.close() }
@@ -302,7 +324,7 @@ object NetworkTimeChecker {
             if (leap == 3 || mode != 4 || stratum !in 1..15 ||
                 kotlin.math.abs(originate - t1) > 1_000
             ) {
-                attempts += "sntp:$server:invalidReply"
+                if (!superseded.get()) attempts += "sntp:$server:invalidReply"
                 return null
             }
 
@@ -311,7 +333,7 @@ object NetworkTimeChecker {
             val offset = ((t2 - t1) + (t3 - t4)) / 2
             t4 + offset
         } catch (e: Exception) {
-            attempts += "sntp:$server:${e.javaClass.simpleName}"
+            if (!superseded.get()) attempts += "sntp:$server:${e.javaClass.simpleName}"
             null
         } finally {
             closers -= closer
@@ -381,6 +403,16 @@ object NetworkTimeChecker {
         val currentBootCount = bootCount(context)
         if (savedBootCount == -1 ||
             (currentBootCount != -1 && savedBootCount != currentBootCount)
+        ) {
+            return null
+        }
+
+        // Age the anchor out: elapsedRealtime drifts a few seconds per
+        // day, so an unrefreshed estimate eventually exceeds tolerance
+        // and would false-flag an honest clock.
+        val recordedElapsed = prefs.getLong(KEY_ANCHOR_ELAPSED, -1L)
+        if (recordedElapsed == -1L ||
+            SystemClock.elapsedRealtime() - recordedElapsed > ANCHOR_MAX_AGE_MS
         ) {
             return null
         }
