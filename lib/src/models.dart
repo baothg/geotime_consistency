@@ -156,6 +156,7 @@ class GeoTimeResult {
     required this.warnings,
     this.serverTime,
     this.deviceTime,
+    this.elapsedRealtimeMs,
     this.timeDeltaMs,
     this.timeSource,
     this.timeAttempts = const [],
@@ -183,6 +184,7 @@ class GeoTimeResult {
             const [],
         serverTime: _millisToDate(m['serverTimeMs']),
         deviceTime: _millisToDate(m['deviceTimeMs']),
+        elapsedRealtimeMs: (m['elapsedRealtimeMs'] as num?)?.toInt(),
         timeDeltaMs: (m['timeDeltaMs'] as num?)?.toInt(),
         timeSource: m['timeSource'] as String?,
         timeAttempts: (m['timeAttempts'] as List?)?.whereType<String>().toList() ??
@@ -211,6 +213,13 @@ class GeoTimeResult {
 
   /// UTC time according to the device clock at check time.
   final DateTime? deviceTime;
+
+  /// `SystemClock.elapsedRealtime()` at check time — milliseconds since
+  /// boot, running during deep sleep, and not changeable by the user.
+  /// Store the latest verified value and subtract it from the current
+  /// one to age a verification independent of wall-clock changes; a
+  /// smaller value than stored means the device rebooted.
+  final int? elapsedRealtimeMs;
 
   /// Signed difference `deviceTime - serverTime`, latency-corrected.
   final int? timeDeltaMs;

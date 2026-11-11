@@ -1,6 +1,7 @@
 package com.example.geotime_consistency
 
 import android.content.Context
+import android.os.SystemClock
 import io.flutter.embedding.engine.plugins.FlutterPlugin
 import io.flutter.plugin.common.MethodCall
 import io.flutter.plugin.common.MethodChannel
@@ -44,6 +45,7 @@ class GeotimeConsistencyPlugin :
                     "failureReasons" to emptyList<String>(),
                     "warnings" to emptyList<String>(),
                     "errorMessage" to "A validation is already in progress",
+                    "elapsedRealtimeMs" to SystemClock.elapsedRealtime(),
                 )
             )
             return
@@ -58,6 +60,7 @@ class GeotimeConsistencyPlugin :
                         "failureReasons" to emptyList<String>(),
                         "warnings" to emptyList<String>(),
                         "errorMessage" to (e.message ?: e.toString()),
+                        "elapsedRealtimeMs" to SystemClock.elapsedRealtime(),
                     )
                 )
             } finally {
@@ -112,6 +115,7 @@ class GeotimeConsistencyPlugin :
                 "failureReasons" to emptyList<String>(),
                 "warnings" to emptyList<String>(),
                 "deviceTimeMs" to time.deviceTimeMs,
+                "elapsedRealtimeMs" to SystemClock.elapsedRealtime(),
             )
         }
         val integrity = integrityDeferred.await()
@@ -194,6 +198,7 @@ class GeotimeConsistencyPlugin :
             "warnings" to warnings,
             "serverTimeMs" to serverTimeMs,
             "deviceTimeMs" to time.deviceTimeMs,
+            "elapsedRealtimeMs" to SystemClock.elapsedRealtime(),
             "timeDeltaMs" to deltaMs,
             // Diagnostics for Crashlytics-style logging: which trusted
             // source answered, and why each attempt failed.
@@ -213,6 +218,7 @@ class GeotimeConsistencyPlugin :
         "failureReasons" to emptyList<String>(),
         "warnings" to emptyList<String>(),
         "errorMessage" to message,
+        "elapsedRealtimeMs" to SystemClock.elapsedRealtime(),
     )
 
     override fun onDetachedFromEngine(binding: FlutterPlugin.FlutterPluginBinding) {
