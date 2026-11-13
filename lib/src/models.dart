@@ -265,16 +265,18 @@ class GeoTimeResult {
   /// The position that passed the radius check — equal to the raw
   /// [latitude]/[longitude] when [pullPercent] is 0, otherwise the fix
   /// pulled that percent toward the target (a "geo_fixed" position).
-  /// Null when no position validated (`outOfRadius` fail, inconclusive,
-  /// or error). Clients must use THIS position for check-in records —
-  /// the raw fix may sit outside the radius.
+  /// Null whenever the result is `fail`, `inconclusive`, or `error` —
+  /// only a validation with no failure exposes it. Clients must use
+  /// THIS position for check-in records — the raw fix may sit outside
+  /// the radius.
   final double? validatedLatitude;
   final double? validatedLongitude;
 
   /// How far the fix was pulled toward the target to validate:
   /// 0 (raw fix passed), 5, or 15 percent. Non-zero means the returned
   /// [validatedLatitude]/[validatedLongitude] is an adjusted position,
-  /// not the measured fix. Null when no position validated.
+  /// not the measured fix. Null together with them on `fail`,
+  /// `inconclusive`, or `error`.
   final double? pullPercent;
 
   /// Populated when [status] is [GeoTimeStatus.error] or

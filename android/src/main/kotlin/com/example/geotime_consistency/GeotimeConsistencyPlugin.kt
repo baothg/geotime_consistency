@@ -206,6 +206,12 @@ class GeotimeConsistencyPlugin :
         }
         if (failures.isNotEmpty()) {
             status = "fail"
+            // A "validated" position must not leak into a failed result —
+            // it is pass-only data; clients may read it without checking
+            // failureReasons.
+            validatedLatitude = null
+            validatedLongitude = null
+            pullPercent = null
         } else if (status == "pass" && serverTimeMs == null) {
             // Network was validated but no trusted time source answered —
             // not the user's fault; don't block, let the client log/retry.
