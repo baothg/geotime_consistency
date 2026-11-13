@@ -42,7 +42,8 @@ enum FailureReason {
   mockLocation,
 
   /// Distance between current location and target exceeds the
-  /// allowed radius.
+  /// allowed radius even after the fix is pulled toward the
+  /// target in steps (5%, then 15%) to absorb GPS noise.
   outOfRadius,
 }
 
@@ -165,6 +166,9 @@ class GeoTimeResult {
     this.longitude,
     this.accuracyMeters,
     this.distanceMeters,
+    this.validatedLatitude,
+    this.validatedLongitude,
+    this.pullPercent,
     this.errorMessage,
   });
 
@@ -194,6 +198,9 @@ class GeoTimeResult {
         longitude: (m['longitude'] as num?)?.toDouble(),
         accuracyMeters: (m['accuracyMeters'] as num?)?.toDouble(),
         distanceMeters: (m['distanceMeters'] as num?)?.toDouble(),
+        validatedLatitude: (m['validatedLatitude'] as num?)?.toDouble(),
+        validatedLongitude: (m['validatedLongitude'] as num?)?.toDouble(),
+        pullPercent: (m['pullPercent'] as num?)?.toDouble(),
         errorMessage: m['errorMessage'] as String?,
       );
 
@@ -239,9 +246,11 @@ class GeoTimeResult {
   /// even when it was not the source used. Null indoors/without fix.
   final DateTime? gnssTime;
 
-  /// Validated coordinates of the fix used for the radius check.
+  /// Raw coordinates of the fix used for the radius check.
   /// Present whenever a fix was obtained (even on `inconclusive`) — the
   /// client may use or cross-check them. Absent when no fix exists.
+  /// For check-in records use [validatedLatitude]/[validatedLongitude]
+  /// instead — the raw fix may sit outside the radius.
   final double? latitude;
   final double? longitude;
 
@@ -249,9 +258,28 @@ class GeoTimeResult {
   final double? accuracyMeters;
 
   /// Distance between current location and the target, in meters.
+  /// Always the RAW fix distance — see [validatedLatitude] for the
+  /// position that passed the radius check.
   final double? distanceMeters;
 
-  /// Populated when [status] is [GeoTimeStatus.error].
+  /// The position that passed the radius check — equal to the raw
+  /// [latitude]/[longitude] when [pullPercent] is 0, otherwise the fix
+  /// pulled that percent toward the target (a "geo_fixed" position).
+  /// Null when no position validated (`outOfRadius` fail, inconclusive,
+  /// or error). Clients must use THIS position for check-in records —
+  /// the raw fix may sit outside the radius.
+  final double? validatedLatitude;
+  final double? validatedLongitude;
+
+  /// How far the fix was pulled toward the target to validate:
+  /// 0 (raw fix passed), 5, or 15 percent. Non-zero means the returned
+  /// [validatedLatitude]/[validatedLongitude] is an adjusted position,
+  /// not the measured fix. Null when no position validated.
+  final double? pullPercent;
+
+  /// Populated when [status] is [GeoTimeStatus.error] or
+  /// [GeoTimeStatus.inconclusive] (explains why, e.g. no fix or
+  /// accuracy too poor).
   final String? errorMessage;
 
   bool get passed => status == GeoTimeStatus.pass;

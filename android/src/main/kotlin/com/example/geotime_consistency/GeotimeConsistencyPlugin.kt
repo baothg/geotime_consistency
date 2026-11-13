@@ -84,6 +84,14 @@ class GeotimeConsistencyPlugin :
             ?: return errorResult("targetLongitude is required")
         val radius = call.argument<Double>("radiusMeters")
             ?: return errorResult("radiusMeters is required")
+        // Client config bugs must surface as errors, not as fail-closed
+        // verdicts that block real users.
+        if (targetLat !in -90.0..90.0 || targetLng !in -180.0..180.0) {
+            return errorResult("target coordinates out of range")
+        }
+        if (!(radius > 0.0)) {
+            return errorResult("radiusMeters must be positive")
+        }
         val toleranceMs = call.argument<Number>("timeToleranceMs")?.toLong() ?: 60_000L
         val maxAccuracy = call.argument<Number>("maxAccuracyMeters")?.toDouble() ?: 100.0
         val timeoutMs = call.argument<Number>("networkTimeoutMs")?.toInt() ?: 5_000
@@ -158,22 +166,34 @@ class GeotimeConsistencyPlugin :
 
         var status = "pass"
         var errorMessage: String? = null
+        var validatedLatitude: Double? = null
+        var validatedLongitude: Double? = null
+        var pullPercent: Double? = null
         when (loc.outcome) {
             LocationChecker.Outcome.OK -> {
                 if (loc.isMock) {
                     failures += "mockLocation"
                 } else {
                     val accuracy = loc.accuracyMeters
-                    when {
-                        accuracy != null && accuracy > maxAccuracy ->
-                            status = "inconclusive"
-                        // Fail only when outside the radius beyond the fix's
-                        // own uncertainty — a user at the radius edge with a
-                        // wobbly fix is not a cheater. The comparison radius
-                        // is eased 10% (100m → 110m); the reported radius
-                        // stays the configured value.
-                        (loc.distanceMeters ?: Float.MAX_VALUE) - (accuracy ?: 0f) > radius * 1.1 ->
+                    if (accuracy != null && accuracy > maxAccuracy) {
+                        status = "inconclusive"
+                        errorMessage =
+                            "GPS accuracy ${accuracy}m exceeds maxAccuracyMeters ${maxAccuracy}m"
+                    } else {
+                        // Radius stays untouched; the fix itself is pulled
+                        // toward the target in steps (0/5/15%), first pass
+                        // wins — same policy as location-multishot-capture.
+                        val verdict = RadiusPolicy.validate(
+                            targetLat, targetLng,
+                            loc.latitude!!, loc.longitude!!, radius,
+                        )
+                        if (verdict == null) {
                             failures += "outOfRadius"
+                        } else {
+                            validatedLatitude = verdict.latitude
+                            validatedLongitude = verdict.longitude
+                            pullPercent = verdict.pullPercent
+                        }
                     }
                 }
             }
@@ -209,6 +229,12 @@ class GeotimeConsistencyPlugin :
             "longitude" to loc.longitude,
             "accuracyMeters" to loc.accuracyMeters?.toDouble(),
             "distanceMeters" to loc.distanceMeters?.toDouble(),
+            // The position that actually passed the radius check (possibly
+            // pulled toward the target) — clients must use this for
+            // check-in records, not the raw fix.
+            "validatedLatitude" to validatedLatitude,
+            "validatedLongitude" to validatedLongitude,
+            "pullPercent" to pullPercent,
             "errorMessage" to errorMessage,
         )
     }

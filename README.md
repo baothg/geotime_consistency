@@ -152,10 +152,14 @@ The plugin manifest already declares `INTERNET`,
    ```
 
 3. **Reuse the validated values.** The result already carries
-   `serverTime` (trusted UTC), `latitude`/`longitude` (the verified
-   fix), `timeDeltaMs`, `distanceMeters`, `accuracyMeters` — use these
+   `serverTime` (trusted UTC), `validatedLatitude`/`validatedLongitude`
+   (the position that passed the radius check — see `pullPercent`),
+   `timeDeltaMs`, `distanceMeters`, `accuracyMeters` — use these
    as the source of truth for check-in payloads or cross-checks; do not
    re-read the device clock or request a second location fix.
+   `pullPercent` tells you whether the validated position is the raw
+   fix (`0`) or was pulled toward the target (`5`/`15`) to pass — a
+   non-zero value means the coordinates are adjusted, not measured.
 
 4. **Log results to Crashlytics** — the plugin never logs by itself.
    Spec below.
@@ -223,9 +227,13 @@ blocked (typical captive/enterprise network), while
 
 ## Hardening
 
-- **Radius fairness**: `outOfRadius` only fails when
-  `distance − accuracy > radius`, so a legitimate user at the edge with
-  a noisy fix isn't rejected.
+- **Radius fairness**: `radiusMeters` is never eased — instead the fix
+  is pulled toward the target in steps (0%, 5%, 15%) and re-checked each
+  time; the first position inside the radius wins (same policy as
+  location-multishot-capture). `outOfRadius` only fails when even the
+  15%-pulled position stays outside, so a legitimate user at the edge
+  with a noisy fix isn't rejected. The winning position is returned as
+  `validatedLatitude`/`validatedLongitude` with `pullPercent`.
 - **Boot-anchor upgrade**: the persisted anchor re-anchors silently
   within 5 minutes after a reboot — a clock change in that window is
   undetected (see `shortcut:` comment in `NetworkTimeChecker`). Server-side
